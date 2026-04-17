@@ -92,6 +92,8 @@ require (
 	github.com/spiffe/go-spiffe/v2 v2.6.0
 	github.com/spiffe/spire-api-sdk v1.14.0
 	github.com/stretchr/testify v1.11.1
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.80
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/vpc v1.3.80
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
 	github.com/vishvananda/netlink v1.3.2-0.20260109214200-c6faf428e8f8

@@ -6,7 +6,8 @@ package eni
 import (
 	"context"
 	"fmt"
-	"github.com/cilium/cilium/pkg/defaults"
+	"os"
+
 	"github.com/cilium/cilium/pkg/ipam"
 	"github.com/cilium/cilium/pkg/ipam/stats"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
@@ -53,20 +54,52 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 	error) {
 	scopedLog.Info("TencentCloud CreateInterface called")
 
-	eniName, err := n.manager.api.CreateNetworkInterface(ctx, 2, "vpc-XXX", "subnet-XXX")
+	vpcID := os.Getenv("TENCENTCLOUD_VPC_ID")
+	subnetID := os.Getenv("TENCENTCLOUD_SUBNET")
+
+	var ipCount int = 4
+	eniID, eni, err := n.manager.api.CreateNetworkInterface(ctx, ipCount, vpcID, subnetID)
 	if err != nil {
 		return 0, "", err
 	}
 
-	//n.mutex.Lock()
-	//defer n.mutex.Unlock()
+	err = n.manager.api.WaitENIAvailable(ctx, eniID)
+	if err != nil {
+		return 0, "", err
+	}
 
-	return 1, eniName, nil
+	instanceID := n.node.InstanceID()
+
+	err = n.manager.api.AttachNetworkInterface(ctx, instanceID, eniID)
+	if err != nil {
+		return 0, "", err
+	}
+
+	err = n.manager.api.WaitENIAttached(ctx, eniID)
+	if err != nil {
+		return 0, "", err
+	}
+	n.manager.updateENI(instanceID, eni)
+
+	return ipCount, eniID, nil
 }
 
 // ResyncInterfacesAndIPs retrieves ENIs and IPs from the API cache
 func (n *Node) ResyncInterfacesAndIPs(ctx context.Context, scopedLog *slog.Logger) (available ipamTypes.AllocationMap, s stats.InterfaceStats, err error) {
 	available = ipamTypes.AllocationMap{}
+	n.manager.instances.ForeachInterface(n.instanceID,
+		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
+			e, ok := rev.Resource.(*ENI)
+			if !ok {
+				return nil
+			}
+			for _, ip := range e.PrivateIPAddresses {
+				if !ip.Primary {
+					available[ip.PrivateIpAddress] = ipamTypes.AllocationIP{Resource: interfaceID}
+				}
+			}
+			return nil
+		})
 	return available, s, nil
 }
 
@@ -75,7 +108,11 @@ func (n *Node) PrepareIPAllocation(scopedLog *slog.Logger) (*ipam.AllocationActi
 	a := &ipam.AllocationAction{}
 	n.mutex.RLock()
 	defer n.mutex.RUnlock()
-	a.EmptyInterfaceSlots = 1 // mock
+
+	hasENI := n.manager.instances.Exists(n.instanceID)
+	if !hasENI {
+		a.EmptyInterfaceSlots = 1
+	}
 	return a, nil
 }
 
@@ -117,7 +154,7 @@ func (n *Node) GetMaximumAllocatableIPv4() int {
 
 // GetMinimumAllocatableIPv4 returns the minimum number of IPv4 addresses that must be allocated
 func (n *Node) GetMinimumAllocatableIPv4() int {
-	return defaults.IPAMPreAllocation
+	return 4
 }
 
 // IsPrefixDelegated returns false; TencentCloud ENIs do not support prefix delegation

@@ -114,6 +114,9 @@ func (c *Client) GetInstance(ctx context.Context, instanceID string) (*ipamTypes
 	}
 
 	for _, iface := range networkInterfaces {
+		if iface.NetworkInterfaceName == nil || *iface.NetworkInterfaceName != "cilium-eni" {
+			continue
+		}
 		ifaceID := *iface.NetworkInterfaceId
 		eni := parseENI(iface)
 		instance.Interfaces[ifaceID] = ipamTypes.InterfaceRevision{Resource: eni}
@@ -191,9 +194,44 @@ func (c *Client) GetInstances(ctx context.Context) (*ipamTypes.InstanceMap, erro
 		if iface.Attachment == nil || iface.Attachment.InstanceId == nil {
 			continue
 		}
+		if iface.NetworkInterfaceName == nil || *iface.NetworkInterfaceName != "cilium-eni" {
+			continue
+		}
 		instanceID := *iface.Attachment.InstanceId
 		eni := parseENI(iface)
 		instances.Update(instanceID, ipamTypes.InterfaceRevision{Resource: eni})
 	}
 	return instances, nil
+}
+
+func (c *Client) UnassignPrivateIpAddresses(ctx context.Context, eniID string, ips []string) error {
+	req := vpc.NewUnassignPrivateIpAddressesRequest()
+	req.NetworkInterfaceId = &eniID
+	for _, ip := range ips {
+		ip := ip
+		req.PrivateIpAddresses = append(req.PrivateIpAddresses, &vpc.PrivateIpAddressSpecification{
+			PrivateIpAddress: &ip,
+		})
+	}
+	_, err := c.vpcClient.UnassignPrivateIpAddresses(req)
+	return err
+}
+
+func (c *Client) AssignPrivateIpAddresses(ctx context.Context, eniID string, count int) ([]string, error) {
+	req := vpc.NewAssignPrivateIpAddressesRequest()
+	req.NetworkInterfaceId = &eniID
+	req.SecondaryPrivateIpAddressCount = uint64Ptr(uint64(count))
+
+	resp, err := c.vpcClient.AssignPrivateIpAddresses(req)
+	if err != nil {
+		return nil, err
+	}
+
+	var ips []string
+	for _, ip := range resp.Response.PrivateIpAddressSet {
+		if ip.PrivateIpAddress != nil {
+			ips = append(ips, *ip.PrivateIpAddress)
+		}
+	}
+	return ips, nil
 }

@@ -57,7 +57,8 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 	vpcID := os.Getenv("TENCENTCLOUD_VPC_ID")
 	subnetID := os.Getenv("TENCENTCLOUD_SUBNET")
 
-	var ipCount int = 4
+	ipCount := maxSecondaryIPsPerENI
+
 	eniID, eni, err := n.manager.api.CreateNetworkInterface(ctx, ipCount, vpcID, subnetID)
 	if err != nil {
 		return 0, "", err
@@ -113,12 +114,34 @@ func (n *Node) PrepareIPAllocation(scopedLog *slog.Logger) (*ipam.AllocationActi
 	if !hasENI {
 		a.EmptyInterfaceSlots = 1
 	}
+
+	n.manager.instances.ForeachInterface(n.instanceID,
+		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
+			e, ok := rev.Resource.(*ENI)
+			if !ok {
+				return nil
+			}
+			secondaryCount := 0
+			for _, ip := range e.PrivateIPAddresses {
+				if !ip.Primary {
+					secondaryCount++
+				}
+			}
+			available := maxSecondaryIPsPerENI - secondaryCount
+			if available > 0 && a.InterfaceID == "" {
+				a.InterfaceID = interfaceID
+				a.IPv4.AvailableForAllocation = available
+			}
+			return nil
+		})
+
 	return a, nil
 }
 
 // AllocateIPs assigns secondary IPs to an ENI
 func (n *Node) AllocateIPs(ctx context.Context, a *ipam.AllocationAction) error {
-	return nil
+	_, err := n.manager.api.AssignPrivateIpAddresses(ctx, a.InterfaceID, a.IPv4.MaxIPsToAllocate)
+	return err
 }
 
 // AllocateStaticIP is not implemented for TencentCloud
@@ -129,9 +152,37 @@ func (n *Node) AllocateStaticIP(ctx context.Context, staticIPTags ipamTypes.Tags
 // PrepareIPRelease selects IPs to release
 func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *slog.Logger) *ipam.ReleaseAction {
 	r := &ipam.ReleaseAction{}
-
 	n.mutex.RLock()
 	defer n.mutex.RUnlock()
+
+	usedIPs := make(map[string]struct{})
+	for ip := range n.k8sObj.Status.IPAM.Used {
+		usedIPs[ip] = struct{}{}
+	}
+
+	n.manager.instances.ForeachInterface(n.instanceID,
+		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
+			if len(r.IPsToRelease) >= excessIPs {
+				return nil
+			}
+			e, ok := rev.Resource.(*ENI)
+			if !ok {
+				return nil
+			}
+			for _, ip := range e.PrivateIPAddresses {
+				if len(r.IPsToRelease) >= excessIPs {
+					break
+				}
+				if !ip.Primary {
+					if _, used := usedIPs[ip.PrivateIpAddress]; !used {
+						r.InterfaceID = interfaceID
+						r.IPsToRelease = append(r.IPsToRelease, ip.PrivateIpAddress)
+					}
+				}
+			}
+			return nil
+		})
+
 	return r
 }
 
@@ -142,7 +193,7 @@ func (n *Node) ReleaseIPPrefixes(ctx context.Context, r *ipam.ReleaseAction) err
 
 // ReleaseIPs releases secondary IPs from an ENI
 func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction) error {
-	return nil
+	return n.manager.api.UnassignPrivateIpAddresses(ctx, r.InterfaceID, r.IPsToRelease)
 }
 
 // GetMaximumAllocatableIPv4 returns the maximum number of IPv4 addresses allocatable on this instance
@@ -154,10 +205,12 @@ func (n *Node) GetMaximumAllocatableIPv4() int {
 
 // GetMinimumAllocatableIPv4 returns the minimum number of IPv4 addresses that must be allocated
 func (n *Node) GetMinimumAllocatableIPv4() int {
-	return 4
+	return maxSecondaryIPsPerENI
 }
 
 // IsPrefixDelegated returns false; TencentCloud ENIs do not support prefix delegation
 func (n *Node) IsPrefixDelegated() bool {
 	return false
 }
+
+const maxSecondaryIPsPerENI = 6

@@ -22,6 +22,8 @@ type TencentCloudAPI interface {
 	GetInstance(ctx context.Context, instanceID string) (*ipamTypes.Instance, error)
 	GetInstances(ctx context.Context) (*ipamTypes.InstanceMap, error)
 	WaitENIAttached(ctx context.Context, eniID string) error
+	UnassignPrivateIpAddresses(ctx context.Context, eniID string, ips []string) error
+	AssignPrivateIpAddresses(ctx context.Context, eniID string, count int) ([]string, error)
 }
 
 // InstancesManager maintains the list of CVM instances and their ENIs.

@@ -68,7 +68,7 @@ func (a *AllocatorTencentCloud) Start(ctx context.Context, getterUpdater ipam.Ci
 	instancesManager := eni.NewInstancesManager(a.rootLogger, a.client)
 	nodeManager, err := ipam.NewNodeManager(a.logger, instancesManager, getterUpdater, &ipamMetrics.NoOpMetrics{},
 		operatorOption.Config.ParallelAllocWorkers,
-		false,
+		true,
 		false,
 	)
 	if err != nil {

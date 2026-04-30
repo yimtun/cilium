@@ -284,7 +284,8 @@ func (r *infraIPAllocator) reallocateRouterIPs(ctx context.Context, family datap
 
 	if (r.daemonConfig.IPAM == ipamOption.IPAMENI ||
 		r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud ||
-		r.daemonConfig.IPAM == ipamOption.IPAMAzure) && result != nil {
+		r.daemonConfig.IPAM == ipamOption.IPAMAzure ||
+		r.daemonConfig.IPAM == ipamOption.IPAMTencentCloud) && result != nil {
 		var routingInfo *linuxrouting.RoutingInfo
 		routingInfo, err = linuxrouting.NewRoutingInfo(r.logger, result.GatewayIP, result.CIDRs,
 			result.PrimaryMAC, result.InterfaceNumber, r.daemonConfig.IPAM,
@@ -391,7 +392,7 @@ func (r *infraIPAllocator) allocateHealthIPs(oldV4HealthIP net.IP, oldV6HealthIP
 		// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the ENI MAC addr
 		// in order to set up rules and routes on the local node to direct
 		// endpoint traffic out of the ENIs.
-		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud {
+		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud || r.daemonConfig.IPAM == ipamOption.IPAMTencentCloud {
 			if r.healthEndpointRouting, err = r.parseRoutingInfo(result); err != nil {
 				r.logger.Warn("Unable to allocate health information for ENI", logfields.Error, err)
 			}
@@ -478,7 +479,7 @@ func (r *infraIPAllocator) allocateIngressIPs(oldV4IngressIP net.IP, oldV6Ingres
 		// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the
 		// ENI MAC addr in order to set up rules and routes on the local node to
 		// direct ingress traffic out of the ENIs.
-		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud {
+		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud || r.daemonConfig.IPAM == ipamOption.IPAMTencentCloud {
 			if ingressRouting, err := r.parseRoutingInfo(result); err != nil {
 				r.logger.Warn("Unable to allocate ingress information for ENI", logfields.Error, err)
 			} else {

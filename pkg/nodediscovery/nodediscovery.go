@@ -38,6 +38,7 @@ import (
 	nodestore "github.com/cilium/cilium/pkg/node/store"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
+	tcMetadata "github.com/cilium/cilium/pkg/tencentcloud/metadata"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -586,6 +587,15 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
 				nodeResource.Spec.IPAM.PreAllocate = c.IPAM.PreAllocate
 			}
 		}
+	case ipamOption.IPAMTencentCloud:
+		instanceID, err := tcMetadata.GetInstanceID(ctx)
+		if err != nil {
+			logging.Fatal(n.logger, "Unable to retrieve InstanceID of own CVM instance", logfields.Error, err)
+		}
+		if instanceID == "" {
+			return errors.New("InstanceID of own CVM instance is empty")
+		}
+		nodeResource.Spec.InstanceID = instanceID
 	}
 
 	return nil

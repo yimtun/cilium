@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/vishvananda/netlink"
@@ -39,6 +40,7 @@ import (
 	"github.com/cilium/cilium/pkg/node"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
+	tcMetadata "github.com/cilium/cilium/pkg/tencentcloud/metadata"
 	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 )
@@ -423,6 +425,16 @@ func (n *nodeStore) updateLocalNodeResource(node *ciliumv2.CiliumNode) {
 		}
 
 		configureENIDevices(n.logger, n.ownNode, node, n.mtuConfig, n.sysctl)
+	}
+
+	// Invalidate stale cache entries for IPs removed from pool; prevents wrong MAC
+	// being returned if an IP is later reassigned to a different ENI on this node.
+	if n.conf.IPAMMode() == ipamOption.IPAMTencentCloud && n.ownNode != nil {
+		for ip := range n.ownNode.Spec.IPAM.Pool {
+			if _, stillExists := node.Spec.IPAM.Pool[ip]; !stillExists {
+				tencentIPMACCache.Delete(ip)
+			}
+		}
 	}
 
 	n.ownNode = node
@@ -875,6 +887,34 @@ func (a *crdAllocator) buildAllocationResult(ip net.IP, ipInfo *ipamTypes.Alloca
 			return
 		}
 		return nil, fmt.Errorf("unable to find ENI %s", ipInfo.Resource)
+
+	case ipamOption.IPAMTencentCloud:
+		mac, err := lookupMACByIP(ip)
+		if err != nil {
+			return nil, fmt.Errorf("tencentcloud: %w", err)
+		}
+		link, err := findLinkByMAC(mac)
+		if err != nil {
+			return nil, fmt.Errorf("tencentcloud: %w", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		maskStr, err := tcMetadata.GetIPSubnetMask(ctx, mac, ip.String())
+		if err != nil {
+			return nil, fmt.Errorf("tencentcloud: failed to get subnet mask for IP %s: %w", ip, err)
+		}
+		mask := net.IPMask(net.ParseIP(strings.TrimSpace(maskStr)).To4())
+		subnet := &net.IPNet{
+			IP:   ip.Mask(mask),
+			Mask: mask,
+		}
+		var ifNum int
+		fmt.Sscanf(link.Attrs().Name, "eth%d", &ifNum)
+		result.PrimaryMAC = mac
+		result.CIDRs = []string{subnet.String()}
+		result.GatewayIP = deriveGatewayIP(a.logger, subnet.String(), 1)
+		result.InterfaceNumber = strconv.Itoa(ifNum)
+		return result, nil
 	}
 
 	return
@@ -1062,4 +1102,46 @@ func (e *ErrIPNotAvailableInPool) Is(target error) bool {
 		return false
 	}
 	return t.ip.Equal(e.ip)
+}
+
+// tencentIPMACCache caches pod IP → MAC address to avoid repeated metadata calls.
+var tencentIPMACCache sync.Map
+
+func lookupMACByIP(ip net.IP) (string, error) {
+	ipStr := ip.String()
+	if v, ok := tencentIPMACCache.Load(ipStr); ok {
+		return v.(string), nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	macs, err := tcMetadata.GetNetworkInterfaceMACs(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to list interface MACs from metadata: %w", err)
+	}
+	for _, mac := range macs {
+		ips, err := tcMetadata.GetNetworkInterfaceLocalIPs(ctx, mac)
+		if err != nil {
+			continue
+		}
+		for _, localIP := range ips {
+			tencentIPMACCache.Store(localIP, mac)
+		}
+	}
+	if v, ok := tencentIPMACCache.Load(ipStr); ok {
+		return v.(string), nil
+	}
+	return "", fmt.Errorf("no ENI interface found for IP %s", ip)
+}
+
+func findLinkByMAC(mac string) (netlink.Link, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list network interfaces: %w", err)
+	}
+	for _, link := range links {
+		if strings.EqualFold(link.Attrs().HardwareAddr.String(), mac) {
+			return link, nil
+		}
+	}
+	return nil, fmt.Errorf("no interface found with MAC %s", mac)
 }

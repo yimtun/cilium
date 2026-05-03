@@ -13,7 +13,7 @@ include ${ROOT_DIR}/../Makefile.defs
 
 TARGETS := cilium-operator cilium-operator-generic cilium-operator-aws cilium-operator-azure cilium-operator-alibabacloud cilium-operator-tencentcloud
 
-.PHONY: all $(TARGETS) clean install install-generic install-aws install-azure install-alibabacloud
+.PHONY: all $(TARGETS) clean install install-generic install-aws install-azure install-alibabacloud install-tencentcloud
 
 all: $(TARGETS)
 
@@ -56,3 +56,7 @@ install-azure:
 install-alibabacloud:
 	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
 	$(QUIET)$(INSTALL) -m 0755 cilium-operator-alibabacloud $(DESTDIR)$(BINDIR)
+
+install-tencentcloud:
+	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	$(QUIET)$(INSTALL) -m 0755 cilium-operator-tencentcloud $(DESTDIR)$(BINDIR)

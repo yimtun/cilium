@@ -55,7 +55,7 @@ func (m *InstancesManager) CreateNode(obj *v2.CiliumNode, node *ipam.Node) ipam.
 		logger:     m.logger,
 		k8sObj:     obj,
 		manager:    m,
-		instanceID: node.InstanceID(),
+		instanceID: obj.InstanceID(),
 		node:       node,
 	}
 }

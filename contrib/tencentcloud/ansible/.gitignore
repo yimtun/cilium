@@ -1,0 +1,4 @@
+files/08-operator-secret.yaml
+files/09-cilium-operator.yaml
+hosts.ini
+terraform.tfstate

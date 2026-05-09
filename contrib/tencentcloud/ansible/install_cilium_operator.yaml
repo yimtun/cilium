@@ -1,0 +1,33 @@
+---
+- name: Deploy cilium-operator-tencentcloud as Deployment
+  hosts: k8s_master
+  become: true
+
+  vars:
+    manifests_dir: /tmp/cilium-manifests
+
+  tasks:
+    - name: Create manifests directory
+      file:
+        path: "{{ manifests_dir }}"
+        state: directory
+    - name: Upload operator manifests
+      copy:
+        src: "files/{{ item }}"
+        dest: "{{ manifests_dir }}/{{ item }}"
+      loop:
+        - 08-operator-secret.yaml
+        - 09-cilium-operator.yaml
+
+    - name: Apply operator manifests
+      command: kubectl apply -f {{ manifests_dir }}/{{ item }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      loop:
+        - 08-operator-secret.yaml
+        - 09-cilium-operator.yaml
+
+    - name: Wait for cilium-operator to be ready
+      command: kubectl -n kube-system rollout status deployment/cilium-operator --timeout=120s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf

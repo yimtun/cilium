@@ -169,7 +169,7 @@ func (c *Client) WaitENIAttached(ctx context.Context, eniID string) error {
 			return err
 		}
 		for _, iface := range ifaces {
-			if iface.State != nil && *iface.State == "INUSE" {
+			if iface.NetworkInterfaceState != nil && *iface.NetworkInterfaceState == "INUSE" {
 				return nil
 			}
 		}

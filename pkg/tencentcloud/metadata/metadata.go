@@ -5,7 +5,11 @@ package metadata
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
+	"net"
 	"net/http"
 	"strings"
 
@@ -87,4 +91,67 @@ func GetNetworkInterfaceLocalIPs(ctx context.Context, mac string) ([]string, err
 // GetIPSubnetMask returns the subnet mask for a specific IP on the given MAC.
 func GetIPSubnetMask(ctx context.Context, mac, ip string) (string, error) {
 	return getMetadata(ctx, "network/interfaces/macs/"+mac+"/local-ipv4s/"+ip+"/subnet-mask")
+}
+
+// GetMAC returns the MAC of the primary interface (eth0).
+func GetMAC(ctx context.Context) (string, error) {
+	return getMetadata(ctx, "mac")
+}
+
+// GetNetworkInterfacePrimaryIP returns the primary local IPv4 of the ENI
+// identified by MAC.
+func GetNetworkInterfacePrimaryIP(ctx context.Context, mac string) (string, error) {
+	return getMetadata(ctx, "network/interfaces/macs/"+mac+"/primary-local-ipv4")
+}
+
+func ConfigureSecondaryENIAddresses(ctx context.Context) error {
+	primaryMAC, err := GetMAC(ctx)
+	if err != nil {
+		return fmt.Errorf("get primary MAC: %w", err)
+	}
+	macs, err := GetNetworkInterfaceMACs(ctx)
+	if err != nil {
+		return fmt.Errorf("list ENI MACs: %w", err)
+	}
+
+	var errs error
+	for _, mac := range macs {
+		if strings.EqualFold(mac, primaryMAC) {
+			continue
+		}
+		ip, err := GetNetworkInterfacePrimaryIP(ctx, mac)
+		if err != nil {
+			errs = errors.Join(errs, fmt.Errorf("primary IP for %s: %w", mac, err))
+			continue
+		}
+		link, err := findLinkByMAC(mac)
+		if err != nil {
+			errs = errors.Join(errs, fmt.Errorf("find link for %s: %w", mac, err))
+			continue
+		}
+		addr := &netlink.Addr{
+			IPNet: &net.IPNet{
+				IP:   net.ParseIP(ip),
+				Mask: net.CIDRMask(32, 32),
+			},
+		}
+		if err := netlink.AddrAdd(link, addr); err != nil && !errors.Is(err, unix.EEXIST) {
+			errs = errors.Join(errs, fmt.Errorf("addr add %s on %s: %w", ip, link.Attrs().Name, err))
+		}
+	}
+	return errs
+}
+
+func findLinkByMAC(mac string) (netlink.Link, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, err
+	}
+	target := strings.ToLower(mac)
+	for _, l := range links {
+		if strings.EqualFold(l.Attrs().HardwareAddr.String(), target) {
+			return l, nil
+		}
+	}
+	return nil, fmt.Errorf("no link with MAC %s", mac)
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/socketlb"
+	tcmetadata "github.com/cilium/cilium/pkg/tencentcloud/metadata"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
@@ -392,6 +393,12 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 		var err error
 		if sysSettings, err = addENIRules(l.logger, sysSettings); err != nil {
 			return fmt.Errorf("unable to install ip rule for ENI multi-node NodePort: %w", err)
+		}
+	}
+
+	if option.Config.IPAM == ipamOption.IPAMTencentCloud && !lnc.KPRConfig.KubeProxyReplacement {
+		if err := tcmetadata.ConfigureSecondaryENIAddresses(ctx); err != nil {
+			return fmt.Errorf("Unable to configure secondary ENI host addresses", logfields.Error, err)
 		}
 	}
 

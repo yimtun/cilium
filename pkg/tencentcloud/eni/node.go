@@ -111,17 +111,14 @@ func (n *Node) PrepareIPAllocation(scopedLog *slog.Logger) (*ipam.AllocationActi
 	n.mutex.RLock()
 	defer n.mutex.RUnlock()
 
-	hasENI := n.manager.instances.Exists(n.instanceID)
-	if !hasENI {
-		a.EmptyInterfaceSlots = 1
-	}
-
+	eniCount := 0
 	n.manager.instances.ForeachInterface(n.instanceID,
 		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
 			e, ok := rev.Resource.(*ENI)
 			if !ok {
 				return nil
 			}
+			eniCount++
 			secondaryCount := 0
 			for _, ip := range e.PrivateIPAddresses {
 				if !ip.Primary {
@@ -136,6 +133,9 @@ func (n *Node) PrepareIPAllocation(scopedLog *slog.Logger) (*ipam.AllocationActi
 			return nil
 		})
 
+	if a.InterfaceID == "" && eniCount < maxSecondaryENIsPerInstance {
+		a.EmptyInterfaceSlots = 1
+	}
 	return a, nil
 }
 
@@ -201,7 +201,7 @@ func (n *Node) ReleaseIPs(ctx context.Context, r *ipam.ReleaseAction) error {
 func (n *Node) GetMaximumAllocatableIPv4() int {
 	n.mutex.RLock()
 	defer n.mutex.RUnlock()
-	return 0
+	return maxSecondaryENIsPerInstance * maxSecondaryIPsPerENI
 }
 
 // GetMinimumAllocatableIPv4 returns the minimum number of IPv4 addresses that must be allocated
@@ -214,4 +214,7 @@ func (n *Node) IsPrefixDelegated() bool {
 	return false
 }
 
-const maxSecondaryIPsPerENI = 6
+const (
+	maxSecondaryIPsPerENI       = 6
+	maxSecondaryENIsPerInstance = 4
+)

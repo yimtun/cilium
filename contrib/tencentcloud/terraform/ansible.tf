@@ -20,5 +20,6 @@ resource "local_file" "cilium_operator_deploy" {
     region    = "ap-seoul"
     vpc_id    = tencentcloud_vpc.test-vpc.id
     subnet_id = tencentcloud_subnet.pod-subnet.id
+    pod_security_group_id = tencentcloud_security_group.test-sg.id
   })
 }

@@ -21,7 +21,7 @@ data:
   # 路由模式：native routing（ENI 直接路由，不走 tunnel）
   tunnel: "disabled"
   routing-mode: "native"
-  auto-direct-node-routes: "true"
+  auto-direct-node-routes: "false"
   ipv4-native-routing-cidr: "10.202.0.0/16"
 
   # 开启 endpoint 路由（ENI 模式必须）
@@ -39,3 +39,10 @@ data:
 
   # 日志级别（调试时可改为 debug）
   debug: "true"
+  enable-hubble: "true"
+  hubble-disable-tls: "true"
+  hubble-listen-address: ":4244"
+  hubble-socket-path: "/var/run/cilium/hubble.sock"
+
+  enable-l7-proxy: "true"
+  tofqdns-dns-reject-response-code: "refused"

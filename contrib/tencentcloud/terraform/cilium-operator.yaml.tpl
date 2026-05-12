@@ -44,6 +44,8 @@ spec:
               value: "${vpc_id}"
             - name: TENCENTCLOUD_SUBNET
               value: "${subnet_id}"
+            - name: POD_SECURITY_GROUP_ID
+              value: "${pod_security_group_id}"
           volumeMounts:
             - name: admin-kubeconfig
               mountPath: /etc/kubernetes/admin.conf

@@ -17,6 +17,17 @@ spec:
           image: yimtune/nginx:1.21.6
           ports:
             - containerPort: 80
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo I am $NODE_NAME > /usr/share/nginx/html/index.html
+              nginx -g 'daemon off;'
 ---
 apiVersion: v1
 kind: Service

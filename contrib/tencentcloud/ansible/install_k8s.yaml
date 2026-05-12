@@ -14,6 +14,9 @@
           net.ipv4.tcp_max_syn_backlog = 20480
           net.core.netdev_max_backlog = 262144
           net.ipv4.tcp_fin_timeout = 20
+          net.ipv4.conf.all.rp_filter = 0
+          net.ipv4.conf.default.rp_filter = 0
+          net.ipv4.conf.eth0.rp_filter = 0
         create: yes
 
     - name: Configure k8s sysctl
@@ -35,6 +38,18 @@
 
     - name: Apply sysctl settings
       command: sysctl --system
+
+    - name: Install udev rule to force rp_filter=0 on hot-plugged ENIs
+      copy:
+        dest: /etc/udev/rules.d/99-zzz-cilium-rpfilter.rules
+        mode: '0644'
+        content: |
+              # 99-zzz prefix ensures this rule runs AFTER 99-systemd.rules
+              # so systemd-sysctl cannot overwrite our value.
+              SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*", RUN+="/bin/sh -c 'echo 0 > /proc/sys/net/ipv4/conf/%k/rp_filter'"
+
+    - name: Reload udev rules
+      command: udevadm control --reload-rules
 
     - name: Deploy NetworkManager config to unmanage ENI interfaces
       copy:

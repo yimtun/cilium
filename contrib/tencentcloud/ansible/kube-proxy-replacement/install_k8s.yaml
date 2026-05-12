@@ -1,0 +1,185 @@
+---
+# Play 1: both cvm init
+- name: Common setup
+  hosts: k8s_master,k8s_node01
+  become: true
+
+  tasks:
+    - name: Configure sysctl in /etc/sysctl.conf
+      blockinfile:
+        path: /etc/sysctl.conf
+        block: |
+          net.ipv4.tcp_syncookies = 1
+          net.ipv4.tcp_max_tw_buckets = 20480
+          net.ipv4.tcp_max_syn_backlog = 20480
+          net.core.netdev_max_backlog = 262144
+          net.ipv4.tcp_fin_timeout = 20
+          net.ipv4.conf.all.rp_filter = 0
+          net.ipv4.conf.default.rp_filter = 0
+          net.ipv4.conf.eth0.rp_filter = 0
+        create: yes
+
+    - name: Configure k8s sysctl
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward = 1
+
+    - name: Load br_netfilter module on boot
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          br_netfilter
+
+    - name: Load br_netfilter module now
+      command: modprobe br_netfilter
+
+    - name: Apply sysctl settings
+      command: sysctl --system
+
+#    - name: Install udev rule to force rp_filter=0 on hot-plugged ENIs
+#      copy:
+#        dest: /etc/udev/rules.d/99-zzz-cilium-rpfilter.rules
+#        mode: '0644'
+#        content: |
+#              # 99-zzz prefix ensures this rule runs AFTER 99-systemd.rules
+#              # so systemd-sysctl cannot overwrite our value.
+#              SUBSYSTEM=="net", ACTION=="add", KERNEL=="eth*", RUN+="/bin/sh -c 'echo 0 > /proc/sys/net/ipv4/conf/%k/rp_filter'"
+#
+#    - name: Reload udev rules
+#      command: udevadm control --reload-rules
+
+    - name: Deploy NetworkManager config to unmanage ENI interfaces
+      copy:
+        src: ../files/99-cilium.conf
+        dest: /etc/NetworkManager/conf.d/99-cilium.conf
+        mode: '0644'
+
+    - name: Reload NetworkManager
+      systemd:
+        name: NetworkManager
+        state: reloaded
+
+    - name: Add Docker CE repo
+      get_url:
+        url: http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+
+    - name: Install yum-utils and containerd
+      yum:
+        name:
+          - yum-utils
+          - containerd.io
+        state: present
+
+    - name: Generate default containerd config
+      shell: containerd config default > /etc/containerd/config.toml
+
+    - name: Enable SystemdCgroup in containerd
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+
+    - name: Enable and restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: true
+
+    - name: Add Kubernetes yum repo
+      copy:
+        dest: /etc/yum.repos.d/k8s.repo
+        content: |
+          [kubernetes]
+          name=Kubernetes
+          baseurl=https://mirrors.aliyun.com/kubernetes/yum/repos/kubernetes-el7-x86_64/
+          enabled=1
+          gpgcheck=0
+          repo_gpgcheck=0
+          gpgkey=https://mirrors.aliyun.com/kubernetes/yum/doc/yum-key.gpg https://mirrors.aliyun.com/kubernetes/yum/doc/rpm-package-key.gpg
+
+    - name: Install kubelet kubeadm kubectl 1.28.2
+      yum:
+        name:
+          - kubelet-1.28.2-0
+          - kubeadm-1.28.2-0
+          - kubectl-1.28.2-0
+        state: present
+
+    - name: Enable kubelet
+      systemd:
+        name: kubelet
+        enabled: true
+
+# Play 2: only apply  on master
+- name: Initialize Kubernetes master
+  hosts: k8s_master
+  become: true
+
+  tasks:
+    - name: Initialize Kubernetes cluster
+      command: >
+        kubeadm init
+        --kubernetes-version=v1.28.2
+        --skip-phases=addon/kube-proxy
+        --apiserver-advertise-address={{ ansible_default_ipv4.address }}
+        --service-cidr=10.96.0.0/24
+        --apiserver-cert-extra-sans={{ ansible_host }}
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Create .kube directory
+      file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        mode: '0755'
+
+    - name: Copy admin.conf to user kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ ansible_env.HOME }}/.kube/config"
+        remote_src: true
+        owner: "{{ ansible_env.USER }}"
+        group: "{{ ansible_env.USER }}"
+        mode: '0600'
+
+    - name: Remove control-plane taint to allow pod scheduling
+      command: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+      environment:
+        KUBECONFIG: "{{ ansible_env.HOME }}/.kube/config"
+      failed_when: false
+
+    - name: Get kubeadm join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Save join command as fact
+      set_fact:
+        kubeadm_join: "{{ join_command.stdout }}"
+
+# Play 3: only apply  on node
+- name: Join worker node to cluster
+  hosts: k8s_node01
+  become: true
+
+  tasks:
+    - name: Join cluster
+      command: "{{ hostvars[groups['k8s_master'][0]]['kubeadm_join'] }}"
+      args:
+        creates: /etc/kubernetes/kubelet.conf
+
+    - name: Fetch admin.conf from master
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: /tmp/admin.conf
+        flat: true
+      delegate_to: "{{ groups['k8s_master'][0] }}"
+
+    - name: Copy admin.conf to worker
+      copy:
+        src: /tmp/admin.conf
+        dest: /etc/kubernetes/admin.conf
+        mode: '0600'

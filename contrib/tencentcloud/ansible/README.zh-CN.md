@@ -20,3 +20,11 @@
    ```bash
    ansible-playbook -i ./hosts.ini ./install_cilium_agent.yaml
    ```
+
+ 如果要完全替换kube-proxy 
+ 
+```shell
+   ansible-playbook -i ./hosts.ini  kube-proxy-replacement/install_k8s.yaml
+   ansible-playbook -i ./hosts.ini ./install_cilium_operator.yaml
+   ansible-playbook -i ./hosts.ini  kube-proxy-replacement/install_cilium_agent.yaml
+```

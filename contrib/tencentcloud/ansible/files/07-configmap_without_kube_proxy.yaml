@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cilium-config
+  namespace: kube-system
+data:
+  # IPAM 模式
+  ipam: "tencentcloud"
+
+  # 启用 IPv4
+  enable-ipv4: "true"
+  enable-ipv6: "false"
+
+  # 替换 kube-proxy
+  kube-proxy-replacement: "true"
+
+  # 集群信息（需与 operator 一致）
+  cluster-name: "default"
+  cluster-id: "0"
+
+  # 路由模式：native routing（ENI 直接路由，不走 tunnel）
+  tunnel: "disabled"
+  routing-mode: "native"
+  auto-direct-node-routes: "false"
+  ipv4-native-routing-cidr: "10.202.0.0/16"
+
+  # 开启 endpoint 路由（ENI 模式必须）
+  enable-endpoint-routes: "true"
+
+  # ENI 模式下 pod 使用 VPC IP，不需要 masquerade
+  enable-ipv4-masquerade: "false"
+
+  # agent ready 后自动写入 CNI 配置文件
+  write-cni-conf-when-ready: "/host/etc/cni/net.d/05-cilium.conflist"
+
+  # 健康检查
+  enable-health-checking: "true"
+  enable-health-check-nodeport: "true"
+
+  # 日志级别（调试时可改为 debug）
+  debug: "true"
+  enable-hubble: "true"
+  hubble-disable-tls: "true"
+  hubble-listen-address: ":4244"
+  hubble-socket-path: "/var/run/cilium/hubble.sock"
+
+  enable-l7-proxy: "true"
+  tofqdns-dns-reject-response-code: "refused"

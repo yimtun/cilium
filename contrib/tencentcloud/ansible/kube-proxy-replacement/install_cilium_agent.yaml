@@ -1,0 +1,39 @@
+---
+# sudo chmod 644 /tmp/cilium-tencentcloud-dev.tar
+- name: Install cilium-agent on tx_host
+  hosts: k8s_master
+  become: true
+
+  vars:
+    local_archive: /tmp/cilium-tencentcloud-dev.tar
+    remote_archive: /tmp/cilium-tencentcloud-dev.tar
+    manifests_dir: /tmp/cilium-manifests
+
+  tasks:
+    - name: Create manifests directory
+      file:
+        path: "{{ manifests_dir }}"
+        state: directory
+
+    - name: Upload Cilium manifests
+      copy:
+        src: "..//files/{{ item }}"
+        dest: "{{ manifests_dir }}/{{ item }}"
+      loop:
+        - 07-configmap_without_kube_proxy.yaml
+        - 06-cilium-ds.yaml
+        - test-nginx.yaml
+
+    - name: Apply Cilium manifests
+      command: kubectl apply -f {{ manifests_dir }}/{{ item }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      loop:
+        - 07-configmap_without_kube_proxy.yaml
+        - 06-cilium-ds.yaml
+        - test-nginx.yaml
+
+    - name: Wait for cilium-agent to be ready
+      command: kubectl -n kube-system rollout status daemonset/cilium --timeout=120s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf

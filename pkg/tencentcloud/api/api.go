@@ -25,12 +25,13 @@ func NewClient(vpcClient *vpc.Client) *Client {
 	}
 }
 
-func (c *Client) CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCount int, vpcID, subnetID string) (string, *eniTypes.ENI, error) {
+func (c *Client) CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCount int, vpcID, subnetID string, securityGroupId string) (string, *eniTypes.ENI, error) {
 	req := vpc.NewCreateNetworkInterfaceRequest()
 	req.VpcId = &vpcID
 	req.SubnetId = &subnetID
 	req.NetworkInterfaceName = strPtr("cilium-eni")
 	req.SecondaryPrivateIpAddressCount = uint64Ptr(uint64(secondaryPrivateIPCount))
+	req.SecurityGroupIds = []*string{strPtr(securityGroupId)}
 	resp, err := c.vpcClient.CreateNetworkInterface(req)
 	if err != nil {
 		return "", nil, err

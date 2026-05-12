@@ -56,10 +56,11 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 
 	vpcID := os.Getenv("TENCENTCLOUD_VPC_ID")
 	subnetID := os.Getenv("TENCENTCLOUD_SUBNET")
+	securityGroupId := os.Getenv("POD_SECURITY_GROUP_ID")
 
 	ipCount := maxSecondaryIPsPerENI
 
-	eniID, eni, err := n.manager.api.CreateNetworkInterface(ctx, ipCount, vpcID, subnetID)
+	eniID, eni, err := n.manager.api.CreateNetworkInterface(ctx, ipCount, vpcID, subnetID, securityGroupId)
 	if err != nil {
 		return 0, "", err
 	}

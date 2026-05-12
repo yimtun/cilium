@@ -16,7 +16,7 @@ import (
 
 // TencentCloudAPI is the API surface used by the InstancesManager
 type TencentCloudAPI interface {
-	CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCount int, vpcID, subnetID string) (string, *ENI, error)
+	CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCount int, vpcID, subnetID string, securityGroupId string) (string, *ENI, error)
 	WaitENIAvailable(ctx context.Context, eniID string) error
 	AttachNetworkInterface(ctx context.Context, instanceID, eniID string) error
 	GetInstance(ctx context.Context, instanceID string) (*ipamTypes.Instance, error)

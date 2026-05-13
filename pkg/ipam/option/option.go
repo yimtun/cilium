@@ -33,6 +33,10 @@ const (
 	// In this mode, Cilium CNI invokes another CNI binary (the delegated plugin) for IPAM.
 	// See https://www.cni.dev/docs/spec/#section-4-plugin-delegation
 	IPAMDelegatedPlugin = "delegated-plugin"
+
+	// IPAMMultiCloud is the value to select the multicloud IPAM plugin,
+	// which auto-detects the cloud provider and delegates to the appropriate backend.
+	IPAMMultiCloud = "multicloud"
 )
 
 const (

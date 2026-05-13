@@ -159,7 +159,7 @@ func (ipam *IPAM) ConfigureAllocator() {
 		if ipam.config.IPv4Enabled() {
 			ipam.ipv4Allocator = v4Allocator
 		}
-	case ipamOption.IPAMCRD, ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
+	case ipamOption.IPAMCRD, ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMMultiCloud:
 		ipam.logger.Info("Initializing CRD-based IPAM")
 		if ipam.config.IPAMMode() == ipamOption.IPAMENI {
 			startENIDeviceConfigurator(ipam.logger, ipam.jg, ipam.nodeResource, ipam.mtuConfig, ipam.sysctl)

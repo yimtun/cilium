@@ -32,6 +32,7 @@ import (
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	multicloudMetadata "github.com/cilium/cilium/pkg/multicloud/metadata"
 	"github.com/cilium/cilium/pkg/node"
 	nodeAddressing "github.com/cilium/cilium/pkg/node/addressing"
 	nodemanager "github.com/cilium/cilium/pkg/node/manager"
@@ -588,6 +589,28 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
 			if c.IPAM.PreAllocate != 0 {
 				nodeResource.Spec.IPAM.PreAllocate = c.IPAM.PreAllocate
 			}
+		}
+
+	case ipamOption.IPAMMultiCloud:
+		CloudProvider, err := multicloudMetadata.DetectCloudProvider(ctx)
+		if err != nil {
+			logging.Fatal(n.logger, "Unable to detect cloud provider", logfields.Error, err)
+		}
+		n.logger.Info("Detected cloud provider", "CloudProvider", CloudProvider)
+
+		switch CloudProvider {
+		case multicloudMetadata.CloudProviderTencent:
+			nodeResource.Spec.InstanceID = "ins-multicloud-tencent-test"
+		case multicloudMetadata.CloudProviderAliyun:
+			nodeResource.Spec.InstanceID = "ins-multicloud-aliyun-test"
+		case multicloudMetadata.CloudProviderAWS:
+			nodeResource.Spec.InstanceID = "ins-multicloud-aws-test"
+		case multicloudMetadata.CloudProviderGCP:
+			nodeResource.Spec.InstanceID = "ins-multicloud-gcp-test"
+		case multicloudMetadata.CloudProviderAzure:
+			nodeResource.Spec.InstanceID = "ins-multicloud-azure-test"
+		default:
+			logging.Fatal(n.logger, "Unsupported cloud provider for multicloud IPAM", "CloudProvider", CloudProvider)
 		}
 	}
 

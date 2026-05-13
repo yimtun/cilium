@@ -240,3 +240,19 @@ resource "tencentcloud_eip"  "out_of_k8s_node01_eip" {
   internet_service_provider = "BGP"
   type = "EIP"
 }
+
+resource "tencentcloud_eip"  "nginx-pod-eip" {
+  name = "nginx-pod-eip"
+  internet_charge_type = "TRAFFIC_POSTPAID_BY_HOUR"
+  internet_max_bandwidth_out = 1
+  internet_service_provider = "BGP"
+  type = "EIP"
+}
+
+# Binding this EIP to a pod IP (ENI secondary IP) must be done manually in the console.
+# The private_ip_address argument is not supported by the current provider version (1.82.39).
+# resource "tencentcloud_eip_association" "nginx-pod-eip" {
+#   eip_id               = tencentcloud_eip.nginx-pod-eip.id
+#   network_interface_id = "eni-jjez0mz0"
+#   private_ip_address   = "10.202.12.15"
+# }

@@ -13,4 +13,9 @@ output "out_of_k8s_node01_eip" {
   value = tencentcloud_eip.out_of_k8s_node01_eip.public_ip
 }
 
+output "nginx-pod-eip" {
+  value = tencentcloud_eip.nginx-pod-eip.public_ip
+}
+
+
 

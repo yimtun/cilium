@@ -3010,7 +3010,7 @@ func (c *DaemonConfig) checkIPv4NativeRoutingCIDR() error {
 	if c.TunnelingEnabled() {
 		return nil
 	}
-	if c.IPAMMode() == ipamOption.IPAMENI || c.IPAMMode() == ipamOption.IPAMAlibabaCloud {
+	if c.IPAMMode() == ipamOption.IPAMENI || c.IPAMMode() == ipamOption.IPAMAlibabaCloud || c.IPAMMode() == ipamOption.IPAMMultiCloud {
 		return nil
 	}
 

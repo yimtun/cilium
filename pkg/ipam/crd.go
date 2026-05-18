@@ -12,6 +12,7 @@ import (
 	"net"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/vishvananda/netlink"
@@ -35,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	multicloudMetadata "github.com/cilium/cilium/pkg/multicloud/metadata"
 	"github.com/cilium/cilium/pkg/node"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
@@ -46,6 +48,14 @@ var (
 	sharedNodeStore *nodeStore
 	initNodeStore   sync.Once
 )
+
+type multiCloudIPInfo struct {
+	mac        string
+	subnetCIDR string
+}
+
+// multiCloudIPMACCache caches pod IP → (MAC, subnetCIDR) to avoid repeated metadata calls.
+var multiCloudIPMACCache sync.Map
 
 const (
 	fieldName = "name"
@@ -347,7 +357,8 @@ func (n *nodeStore) hasMinimumIPsInPool(localNodeStore *node.LocalNodeStore) (mi
 			minimumReached = true
 		}
 
-		if n.conf.IPAMMode() == ipamOption.IPAMENI || n.conf.IPAMMode() == ipamOption.IPAMAzure || n.conf.IPAMMode() == ipamOption.IPAMAlibabaCloud {
+		if n.conf.IPAMMode() == ipamOption.IPAMENI || n.conf.IPAMMode() == ipamOption.IPAMAzure ||
+			n.conf.IPAMMode() == ipamOption.IPAMAlibabaCloud || n.conf.IPAMMode() == ipamOption.IPAMMultiCloud {
 			if !n.autoDetectIPv4NativeRoutingCIDR(localNodeStore) {
 				minimumReached = false
 			}
@@ -371,6 +382,14 @@ func (n *nodeStore) deleteLocalNodeResource() {
 func (n *nodeStore) updateLocalNodeResource(node *ciliumv2.CiliumNode) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
+
+	if n.conf.IPAMMode() == ipamOption.IPAMMultiCloud && n.ownNode != nil {
+		for ip := range n.ownNode.Spec.IPAM.Pool {
+			if _, stillExists := node.Spec.IPAM.Pool[ip]; !stillExists {
+				multiCloudIPMACCache.Delete(ip)
+			}
+		}
+	}
 
 	n.ownNode = node
 	n.allocationPoolSize[IPv4] = 0
@@ -788,6 +807,39 @@ func (a *crdAllocator) buildAllocationResult(ip net.IP, ipInfo *ipamTypes.Alloca
 			return
 		}
 		return nil, fmt.Errorf("unable to find ENI %s", ipInfo.Resource)
+
+	case ipamOption.IPAMMultiCloud:
+		cloudProvider := a.store.ownNode.Spec.MultiCloud.CloudProvider
+		ipStr := ip.String()
+		var mac, subnetCIDR string
+		if v, ok := multiCloudIPMACCache.Load(ipStr); ok {
+			cached := v.(multiCloudIPInfo)
+			mac, subnetCIDR = cached.mac, cached.subnetCIDR
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var err error
+			mac, subnetCIDR, err = multicloudMetadata.LookupIPInfo(ctx, cloudProvider, ipStr)
+			if err != nil {
+				return nil, fmt.Errorf("multicloud: %w", err)
+			}
+			multiCloudIPMACCache.Store(ipStr, multiCloudIPInfo{mac: mac, subnetCIDR: subnetCIDR})
+		}
+		link, err := findLinkByMAC(mac)
+		if err != nil {
+			return nil, fmt.Errorf("multicloud: %w", err)
+		}
+		var ifNum int
+		fmt.Sscanf(link.Attrs().Name, "eth%d", &ifNum)
+		result.PrimaryMAC = mac
+		result.CIDRs = []string{subnetCIDR}
+		gatewayOffset := 1
+		if cloudProvider == multicloudMetadata.CloudProviderAliyun {
+			gatewayOffset = -3
+		}
+		result.GatewayIP = deriveGatewayIP(a.logger, subnetCIDR, gatewayOffset)
+		result.InterfaceNumber = strconv.Itoa(ifNum)
+		return result, nil
 	}
 
 	return
@@ -975,4 +1027,17 @@ func (e *ErrIPNotAvailableInPool) Is(target error) bool {
 		return false
 	}
 	return t.ip.Equal(e.ip)
+}
+
+func findLinkByMAC(mac string) (netlink.Link, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list network interfaces: %w", err)
+	}
+	for _, link := range links {
+		if strings.EqualFold(link.Attrs().HardwareAddr.String(), mac) {
+			return link, nil
+		}
+	}
+	return nil, fmt.Errorf("no interface found with MAC %s", mac)
 }

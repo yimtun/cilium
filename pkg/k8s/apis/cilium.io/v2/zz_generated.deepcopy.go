@@ -2606,6 +2606,7 @@ func (in *NodeSpec) DeepCopyInto(out *NodeSpec) {
 	in.ENI.DeepCopyInto(&out.ENI)
 	out.Azure = in.Azure
 	in.AlibabaCloud.DeepCopyInto(&out.AlibabaCloud)
+	out.MultiCloud = in.MultiCloud
 	in.IPAM.DeepCopyInto(&out.IPAM)
 	return
 }

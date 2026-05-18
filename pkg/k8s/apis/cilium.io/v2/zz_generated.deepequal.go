@@ -2322,6 +2322,10 @@ func (in *NodeSpec) DeepEqual(other *NodeSpec) bool {
 		return false
 	}
 
+	if in.MultiCloud != other.MultiCloud {
+		return false
+	}
+
 	if !in.IPAM.DeepEqual(&other.IPAM) {
 		return false
 	}

@@ -424,6 +424,26 @@ spec:
                       filter Elastic IP Addresses.
                     type: object
                 type: object
+              multi-cloud:
+                description: MultiCloud is the multicloud IPAM specific configuration.
+                properties:
+                  cloud-provider:
+                    description: CloudProvider is the detected cloud provider (tencentcloud,
+                      aws, alibabacloud).
+                    type: string
+                  region:
+                    description: Region is the cloud region where the node resides.
+                    type: string
+                  subnet-id:
+                    description: |-
+                      SubnetID is the subnet ID of the node's primary network interface (eth0).
+                      For Alibaba Cloud this corresponds to the vswitch-id.
+                    type: string
+                  vpc-id:
+                    description: VPCID is the VPC ID of the node's primary network
+                      interface.
+                    type: string
+                type: object
               nodeidentity:
                 description: NodeIdentity is the Cilium numeric identity allocated
                   for the node, if any.

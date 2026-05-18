@@ -14,6 +14,7 @@ import (
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+	multiCloudTypes "github.com/cilium/cilium/pkg/multicloud/eni/types"
 	"github.com/cilium/cilium/pkg/node/addressing"
 )
 
@@ -451,6 +452,11 @@ type NodeSpec struct {
 	//
 	// +kubebuilder:validation:Optional
 	AlibabaCloud alibabaCloudTypes.Spec `json:"alibaba-cloud,omitempty"`
+
+	// MultiCloud is the multicloud IPAM specific configuration.
+	//
+	// +kubebuilder:validation:Optional
+	MultiCloud multiCloudTypes.Spec `json:"multi-cloud,omitempty"`
 
 	// IPAM is the address management specification. This section can be
 	// populated by a user or it can be automatically populated by an IPAM

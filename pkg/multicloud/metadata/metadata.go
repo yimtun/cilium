@@ -8,94 +8,80 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/cilium/cilium/pkg/safeio"
+	"github.com/cilium/cilium/pkg/time"
+)
+
+const (
+	detectMaxRetries    = 3
+	detectRetryInterval = 5 * time.Second
 )
 
 const (
 	CloudProviderTencent = "tencentcloud"
 	CloudProviderAliyun  = "alibabacloud"
 	CloudProviderAWS     = "aws"
-	CloudProviderGCP     = "gcp"
-	CloudProviderAzure   = "azure"
 	CloudProviderUnknown = "unknown"
 )
 
-type cloudDetector struct {
-	name   string
-	detect func(ctx context.Context) bool
+// InstanceMetadata holds cloud instance information needed for multicloud IPAM.
+type InstanceMetadata struct {
+	CloudProvider string
+	InstanceID    string
+	Region        string
+	VPCID         string
+	SubnetID      string // eth0 subnet; vswitch-id for Alibaba
 }
 
-// DetectCloudProvider probes cloud metadata endpoints directly from the host
-// network and returns the cloud provider name.
-func DetectCloudProvider(ctx context.Context) (string, error) {
-	detectors := []cloudDetector{
-		{CloudProviderTencent, detectTencent},
-		{CloudProviderAliyun, detectAliyun},
-		{CloudProviderAWS, detectAWS},
-		{CloudProviderGCP, detectGCP},
-		{CloudProviderAzure, detectAzure},
-	}
+type cloudProvider interface {
+	detect(ctx context.Context) bool
+	getInstanceMetadata(ctx context.Context) (InstanceMetadata, error)
+	providerName() string
+}
 
-	for _, d := range detectors {
-		if d.detect(ctx) {
-			return d.name, nil
+var providers = []cloudProvider{
+	&tencentProvider{},
+	&alibabaProvider{},
+	&awsProvider{},
+}
+
+// GetInstanceMetadata detects the cloud provider and returns instance metadata.
+// Each provider is retried up to detectMaxRetries times with detectRetryInterval between attempts.
+func GetInstanceMetadata(ctx context.Context) (InstanceMetadata, error) {
+	for _, p := range providers {
+		for attempt := 1; attempt <= detectMaxRetries; attempt++ {
+			if p.detect(ctx) {
+				meta, err := p.getInstanceMetadata(ctx)
+				if err != nil {
+					return InstanceMetadata{}, fmt.Errorf("get metadata for %s: %w", p.providerName(), err)
+				}
+				meta.CloudProvider = p.providerName()
+				return meta, nil
+			}
+			if attempt < detectMaxRetries {
+				select {
+				case <-ctx.Done():
+					return InstanceMetadata{CloudProvider: CloudProviderUnknown}, ctx.Err()
+				case <-time.After(detectRetryInterval):
+				}
+			}
 		}
 	}
-	return CloudProviderUnknown, fmt.Errorf("unable to detect cloud provider")
+	return InstanceMetadata{CloudProvider: CloudProviderUnknown},
+		fmt.Errorf("unable to detect cloud provider")
 }
 
-func detectTencent(ctx context.Context) bool {
-	body, err := getMetadata(ctx, "http://metadata.tencentyun.com/latest/meta-data/instance-id", nil)
-	if err != nil {
-		return false
-	}
-	return strings.HasPrefix(body, "ins-") && len(body) > 4
+// DetectCloudProvider returns the cloud provider name.
+func DetectCloudProvider(ctx context.Context) (string, error) {
+	meta, err := GetInstanceMetadata(ctx)
+	return meta.CloudProvider, err
 }
 
-func detectAliyun(ctx context.Context) bool {
-	body, err := getMetadata(ctx, "http://100.100.100.200/latest/meta-data/instance-id", nil)
-	if err != nil {
-		return false
-	}
-	return strings.HasPrefix(body, "i-") && len(body) > 2
-}
+var httpClient = &http.Client{Timeout: time.Second * 10}
 
-func detectAWS(ctx context.Context) bool {
-	resp, err := headMetadata(ctx, "http://169.254.169.254/latest/meta-data/instance-id")
-	if err != nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(resp.Header.Get("Server")), "ec2ws")
-}
-
-func detectGCP(ctx context.Context) bool {
-	body, err := getMetadata(ctx,
-		"http://metadata.google.internal/computeMetadata/v1/instance/id",
-		map[string]string{"Metadata-Flavor": "Google"},
-	)
-	if err != nil {
-		return false
-	}
-	_, err = strconv.ParseInt(strings.TrimSpace(body), 10, 64)
-	return err == nil
-}
-
-func detectAzure(ctx context.Context) bool {
-	body, err := getMetadata(ctx,
-		"http://169.254.169.254/metadata/instance/compute/vmId?api-version=2021-02-01&format=text",
-		map[string]string{"Metadata": "true"},
-	)
-	if err != nil {
-		return false
-	}
-	body = strings.TrimSpace(body)
-	return len(body) == 36 && strings.Count(body, "-") == 4
-}
-
-func getMetadata(ctx context.Context, url string, headers map[string]string) (string, error) {
+func httpGet(ctx context.Context, url string, headers map[string]string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -103,32 +89,27 @@ func getMetadata(ctx context.Context, url string, headers map[string]string) (st
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
-
 	body, err := safeio.ReadAllLimit(resp.Body, safeio.MB)
 	if err != nil {
 		return "", err
 	}
-	return string(body), nil
+	return strings.TrimSpace(string(body)), nil
 }
 
-func headMetadata(ctx context.Context, url string) (*http.Response, error) {
+func httpHead(ctx context.Context, url string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

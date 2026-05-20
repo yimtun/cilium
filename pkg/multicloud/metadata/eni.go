@@ -41,7 +41,7 @@ func tencentLookupIPInfo(ctx context.Context, ipStr string) (string, string, err
 			continue
 		}
 		for _, ipLine := range strings.Split(strings.TrimSpace(ipsRaw), "\n") {
-			if strings.TrimSpace(ipLine) != ipStr {
+			if strings.TrimSuffix(strings.TrimSpace(ipLine), "/") != ipStr {
 				continue
 			}
 			maskStr, err := httpGet(ctx, tcBase+"/network/interfaces/macs/"+mac+"/local-ipv4s/"+ipStr+"/subnet-mask", nil)
@@ -77,7 +77,7 @@ func awsLookupIPInfo(ctx context.Context, ipStr string) (string, string, error) 
 			continue
 		}
 		for _, ipLine := range strings.Split(strings.TrimSpace(ipsRaw), "\n") {
-			if strings.TrimSpace(ipLine) != ipStr {
+			if strings.TrimSuffix(strings.TrimSpace(ipLine), "/") != ipStr {
 				continue
 			}
 			cidrBlock, err := awsGet(ctx, awsBase+"/network/interfaces/macs/"+mac+"/subnet-ipv4-cidr-block", token)

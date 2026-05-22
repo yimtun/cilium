@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/cilium/cilium/pkg/safeio"
 	"github.com/cilium/cilium/pkg/time"
@@ -73,10 +74,31 @@ func GetInstanceMetadata(ctx context.Context) (InstanceMetadata, error) {
 		fmt.Errorf("unable to detect cloud provider")
 }
 
+var (
+	cachedCloudProvider string
+	cacheMu             sync.RWMutex
+)
+
+func WarmCloudProviderCache(provider string) {
+	cacheMu.Lock()
+	cachedCloudProvider = provider
+	cacheMu.Unlock()
+}
+
 // DetectCloudProvider returns the cloud provider name.
 func DetectCloudProvider(ctx context.Context) (string, error) {
+	cacheMu.RLock()
+	provider := cachedCloudProvider
+	cacheMu.RUnlock()
+	if provider != "" {
+		return provider, nil
+	}
 	meta, err := GetInstanceMetadata(ctx)
-	return meta.CloudProvider, err
+	if err != nil {
+		return "", err
+	}
+	WarmCloudProviderCache(meta.CloudProvider)
+	return meta.CloudProvider, nil
 }
 
 var httpClient = &http.Client{Timeout: time.Second * 10}

@@ -122,3 +122,53 @@ func aliLookupIPInfo(ctx context.Context, ipStr string) (string, string, error) 
 	}
 	return "", "", fmt.Errorf("IP %s not found on any Alibaba interface", ipStr)
 }
+
+// GetInterfacePrimaryIP returns the primary private IPv4 of the ENI identified by mac.
+func GetInterfacePrimaryIP(ctx context.Context, cloudProvider, mac string) (string, error) {
+	switch cloudProvider {
+	case CloudProviderTencent:
+		raw, err := httpGet(ctx, tcBase+"/network/interfaces/macs/"+mac+"/primary-local-ipv4", nil)
+		return strings.TrimSpace(raw), err
+	case CloudProviderAWS:
+		token := getIMDSv2Token(ctx)
+		raw, err := awsGet(ctx, awsBase+"/network/interfaces/macs/"+mac+"/local-ipv4s", token)
+		if err != nil {
+			return "", err
+		}
+		lines := strings.Split(strings.TrimSpace(raw), "\n")
+		return strings.TrimSuffix(strings.TrimSpace(lines[0]), "/"), nil
+	case CloudProviderAliyun:
+		raw, err := httpGet(ctx, aliBase+"/network/interfaces/macs/"+mac+"/private-ipv4s", nil)
+		if err != nil {
+			return "", err
+		}
+		var ips []string
+		if err := json.Unmarshal([]byte(raw), &ips); err != nil {
+			return "", fmt.Errorf("parse private-ipv4s: %w", err)
+		}
+		if len(ips) == 0 {
+			return "", fmt.Errorf("no IPs for MAC %s", mac)
+		}
+		return strings.TrimSpace(ips[0]), nil
+	default:
+		return "", fmt.Errorf("unsupported cloud provider: %s", cloudProvider)
+	}
+}
+
+// GetPrimaryMAC returns the MAC address of the primary network interface (eth0).
+func GetPrimaryMAC(ctx context.Context, cloudProvider string) (string, error) {
+	switch cloudProvider {
+	case CloudProviderTencent:
+		raw, err := httpGet(ctx, tcBase+"/mac", nil)
+		return strings.TrimSpace(raw), err
+	case CloudProviderAWS:
+		token := getIMDSv2Token(ctx)
+		raw, err := awsGet(ctx, awsBase+"/mac", token)
+		return strings.TrimSpace(raw), err
+	case CloudProviderAliyun:
+		raw, err := httpGet(ctx, aliBase+"/mac", nil)
+		return strings.TrimSpace(raw), err
+	default:
+		return "", fmt.Errorf("unsupported cloud provider: %s", cloudProvider)
+	}
+}

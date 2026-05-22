@@ -24,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
+	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/datapath/prefilter"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
@@ -93,6 +94,23 @@ func writePreFilterHeader(logger *slog.Logger, preFilter prefilter.PreFilter, di
 	fmt.Fprint(fw, " */\n\n")
 	preFilter.WriteConfig(fw)
 	return fw.Flush()
+}
+
+func configureMultiCloudInterfaces(logger *slog.Logger, sysctlMgr sysctl.Sysctl) {
+	links, err := safenetlink.LinkList()
+	if err != nil {
+		logger.Warn("multicloud: failed to list interfaces", logfields.Error, err)
+		return
+	}
+	for _, link := range links {
+		if link.Attrs().Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		name := link.Attrs().Name
+		if err := sysctlMgr.Disable([]string{"net", "ipv4", "conf", name, "rp_filter"}); err != nil {
+			logger.Warn("multicloud: failed to disable rp_filter", logfields.Interface, name, logfields.Error, err)
+		}
+	}
 }
 
 func addENIRules(logger *slog.Logger, sysSettings []tables.Sysctl) ([]tables.Sysctl, error) {
@@ -407,6 +425,10 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *config.Config, tunnelCon
 
 	if err := reinitializeOverlay(ctx, l.logger, l.registry, lnc, tunnelConfig); err != nil {
 		return err
+	}
+
+	if option.Config.IPAM == ipamOption.IPAMMultiCloud {
+		configureMultiCloudInterfaces(l.logger, l.sysctl)
 	}
 
 	if err := l.nodeConfigNotifier.Notify(*lnc); err != nil {

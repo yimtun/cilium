@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"sync/atomic"
 
 	"github.com/cilium/hive/cell"
@@ -15,12 +16,14 @@ import (
 	"github.com/cilium/statedb"
 	"github.com/cilium/stream"
 	"github.com/spf13/pflag"
+	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/datapath/config"
 	"github.com/cilium/cilium/pkg/datapath/connector"
 	"github.com/cilium/cilium/pkg/datapath/iptables"
 	"github.com/cilium/cilium/pkg/datapath/linux/bigtcp"
 	ipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/types"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	loader "github.com/cilium/cilium/pkg/datapath/loader/types"
@@ -31,11 +34,13 @@ import (
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/endpointmanager"
+	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/kpr"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maglev"
 	"github.com/cilium/cilium/pkg/mtu"
+	multicloudMetadata "github.com/cilium/cilium/pkg/multicloud/metadata"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/nodediscovery"
 	"github.com/cilium/cilium/pkg/option"
@@ -236,6 +241,12 @@ func (o *orchestrator) reconciler(ctx context.Context, health cell.Health) error
 			health.Degraded("failed to get local node configuration", err)
 			o.params.Log.Warn("Failed to construct local node configuration", logfields.Error, err)
 		} else {
+			if option.Config.IPAM == ipamOption.IPAMMultiCloud {
+				bringUpDownPhysicalInterfaces(o.params.Log)
+				if err := multicloudMetadata.ConfigureSecondaryENIAddresses(ctx, o.params.Log); err != nil {
+					o.params.Log.Warn("multicloud: failed to configure secondary ENI addresses", logfields.Error, err)
+				}
+			}
 			// Reinitializing is expensive, only do so if the configuration has changed.
 			prevConfig := o.latestLocalNodeConfig.Load()
 			if prevConfig == nil || !prevConfig.DeepEqual(&localNodeConfig) {
@@ -273,6 +284,37 @@ func (o *orchestrator) reconciler(ctx context.Context, health cell.Health) error
 		// a chance to settle down.
 		if err := limiter.Wait(ctx); err != nil {
 			return err
+		}
+	}
+}
+
+// bringUpDownPhysicalInterfaces brings up any physical (type=="device") interfaces that are
+// currently DOWN. Used in MultiCloud IPAM mode to handle hot-plugged ENIs: a reattached ENI
+// appears as DOWN, which does not change localNodeConfig (DOWN interfaces are excluded), so
+// DeepEqual would suppress Reinitialize(). Bringing the interface UP here triggers a
+// RTM_NEWLINK event → statedb update → the watch fires again → next loop iteration sees
+// the UP interface in localNodeConfig → DeepEqual detects a change → Reinitialize() runs.
+func bringUpDownPhysicalInterfaces(logger *slog.Logger) {
+	links, err := safenetlink.LinkList()
+	if err != nil {
+		logger.Warn("multicloud: failed to list interfaces for UP check", logfields.Error, err)
+		return
+	}
+	for _, link := range links {
+		if link.Attrs().Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if link.Type() != "device" {
+			continue
+		}
+		if link.Attrs().Flags&net.FlagUp != 0 {
+			continue
+		}
+		name := link.Attrs().Name
+		if err := netlink.LinkSetUp(link); err != nil {
+			logger.Warn("multicloud: failed to bring up interface", logfields.Interface, name, logfields.Error, err)
+		} else {
+			logger.Info("multicloud: brought up DOWN interface for hot-plug", logfields.Interface, name)
 		}
 	}
 }

@@ -604,6 +604,7 @@ func (n *NodeDiscovery) mutateNodeResource(ctx context.Context, nodeResource *ci
 			"VPCID", meta.VPCID,
 			"SubnetID", meta.SubnetID,
 		)
+		multicloudMetadata.WarmCloudProviderCache(meta.CloudProvider)
 		nodeResource.Spec.InstanceID = meta.InstanceID
 		nodeResource.Spec.MultiCloud = multiCloudTypes.Spec{
 			CloudProvider: meta.CloudProvider,

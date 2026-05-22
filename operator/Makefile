@@ -11,9 +11,9 @@ include ${ROOT_DIR}/../Makefile.defs
 # ROOT_DIR changes to repo root after including Makefile.defs
 -include ${ROOT_DIR}/Makefile.override
 
-TARGETS := cilium-operator cilium-operator-generic cilium-operator-aws cilium-operator-azure cilium-operator-alibabacloud
+TARGETS := cilium-operator cilium-operator-generic cilium-operator-aws cilium-operator-azure cilium-operator-alibabacloud cilium-operator-multicloud
 
-.PHONY: all $(TARGETS) clean install install-generic install-aws install-azure install-alibabacloud
+.PHONY: all $(TARGETS) clean install install-generic install-aws install-azure install-alibabacloud install-multicloud
 
 all: $(TARGETS)
 
@@ -22,6 +22,7 @@ cilium-operator-generic: GO_TAGS_FLAGS+=ipam_provider_operator
 cilium-operator-aws: GO_TAGS_FLAGS+=ipam_provider_aws
 cilium-operator-azure: GO_TAGS_FLAGS+=ipam_provider_azure
 cilium-operator-alibabacloud: GO_TAGS_FLAGS+=ipam_provider_alibabacloud
+cilium-operator-multicloud: GO_TAGS_FLAGS+=ipam_provider_multicloud
 
 $(TARGETS):
 	@$(ECHO_GO)
@@ -55,3 +56,7 @@ install-azure:
 install-alibabacloud:
 	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
 	$(QUIET)$(INSTALL) -m 0755 cilium-operator-alibabacloud $(DESTDIR)$(BINDIR)
+
+install-multicloud:
+	$(QUIET)$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
+	$(QUIET)$(INSTALL) -m 0755 cilium-operator-multicloud $(DESTDIR)$(BINDIR)

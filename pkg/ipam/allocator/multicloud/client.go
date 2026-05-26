@@ -32,22 +32,15 @@ type CloudAPI interface {
 
 // newCloudClient creates a CloudAPI implementation for the given key.
 // Credentials are read from environment variables per cloud provider.
-func newCloudClient(_ context.Context, key ClientKey) (CloudAPI, error) {
+func newCloudClient(ctx context.Context, key ClientKey) (CloudAPI, error) {
 	switch key.CloudProvider {
 	case mcMeta.CloudProviderTencent:
 		return newTencentClient(key)
 	case mcMeta.CloudProviderAliyun:
 		return newAlibabaClient(key)
 	case mcMeta.CloudProviderAWS:
-		return newAWSClient(key)
+		return newAWSClient(ctx, key)
 	default:
 		return nil, fmt.Errorf("unknown cloud provider %q", key.CloudProvider)
 	}
-}
-
-func newTencentClient(key ClientKey) (CloudAPI, error) {
-	// TODO: initialize real TencentCloud VPC client once SDK is vendored.
-	// Credentials: TENCENTCLOUD_SECRET_ID, TENCENTCLOUD_SECRET_KEY from env.
-	_ = key
-	return &tencentClient{}, nil
 }

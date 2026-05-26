@@ -35,6 +35,27 @@ func (n *Node) UpdatedNode(obj *v2.CiliumNode) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 	n.k8sObj = obj
+
+	// If the clientKey was created before the agent wrote cloud metadata,
+	// pick it up now so subsequent operations use the correct cloud client.
+	if n.clientKey.CloudProvider == "" && obj.Spec.MultiCloud.CloudProvider != "" {
+		newKey := ClientKey{
+			CloudProvider: obj.Spec.MultiCloud.CloudProvider,
+			Region:        obj.Spec.MultiCloud.Region,
+		}
+		n.clientKey = newKey
+		n.manager.mutex.Lock()
+		n.manager.nodeToKey[n.instanceID] = newKey
+		n.manager.mutex.Unlock()
+		if _, err := n.manager.allocator.getOrCreateClient(context.Background(), newKey); err != nil {
+			n.logger.Warn("Failed to initialise cloud client after node update",
+				"nodeName", obj.Name,
+				"cloudProvider", newKey.CloudProvider,
+				"region", newKey.Region,
+				"error", err,
+			)
+		}
+	}
 }
 
 func (n *Node) PopulateStatusFields(resource *v2.CiliumNode) {}
@@ -150,6 +171,11 @@ func (n *Node) PrepareIPRelease(excessIPs int, scopedLog *slog.Logger) *ipam.Rel
 
 	n.manager.instances.ForeachInterface(n.instanceID,
 		func(instanceID, interfaceID string, rev ipamTypes.InterfaceRevision) error {
+			// Once an ENI is selected, do not collect IPs from other ENIs —
+			// ReleaseIPs calls the cloud API with a single interfaceID.
+			if r.InterfaceID != "" {
+				return nil
+			}
 			if len(r.IPsToRelease) >= excessIPs {
 				return nil
 			}

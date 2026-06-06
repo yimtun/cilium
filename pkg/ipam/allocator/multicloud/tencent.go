@@ -75,13 +75,36 @@ func (c *tencentClient) GetInstance(ctx context.Context, instanceID string) (*ip
 	return instance, nil
 }
 
-func (c *tencentClient) CreateNetworkInterface(ctx context.Context, ipCount int, vpcID, subnetID, securityGroupID string) (string, *ENI, error) {
+func (c *tencentClient) GetSecurityGroups(ctx context.Context, instanceID, primaryIP string) ([]string, error) {
+	ifaces, err := c.describeNetworkInterfacesByInstance(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	for _, iface := range ifaces {
+		for _, ip := range iface.PrivateIpAddressSet {
+			if ip.Primary != nil && *ip.Primary && ip.PrivateIpAddress != nil && *ip.PrivateIpAddress == primaryIP {
+				var sgs []string
+				for _, sg := range iface.GroupSet {
+					if sg != nil {
+						sgs = append(sgs, *sg)
+					}
+				}
+				return sgs, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("tencentcloud: primary ENI not found for instance %s ip %s", instanceID, primaryIP)
+}
+
+func (c *tencentClient) CreateNetworkInterface(ctx context.Context, ipCount int, vpcID, subnetID string, securityGroupIDs []string) (string, *ENI, error) {
 	req := tcVpc.NewCreateNetworkInterfaceRequest()
 	req.VpcId = &vpcID
 	req.SubnetId = &subnetID
 	req.NetworkInterfaceName = strPtr("cilium-eni")
 	req.SecondaryPrivateIpAddressCount = uint64Ptr(uint64(ipCount))
-	req.SecurityGroupIds = []*string{&securityGroupID}
+	for i := range securityGroupIDs {
+		req.SecurityGroupIds = append(req.SecurityGroupIds, &securityGroupIDs[i])
+	}
 
 	resp, err := c.vpcClient.CreateNetworkInterface(req)
 	if err != nil {
@@ -242,6 +265,11 @@ func parseTencentENI(iface *tcVpc.NetworkInterface) *ENI {
 			PrivateIpAddress: *ip.PrivateIpAddress,
 			Primary:          primary,
 		})
+	}
+	for _, sg := range iface.GroupSet {
+		if sg != nil {
+			eni.SecurityGroups = append(eni.SecurityGroups, *sg)
+		}
 	}
 	return eni
 }

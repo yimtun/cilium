@@ -9,6 +9,7 @@ import ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 type ENI struct {
 	NetworkInterfaceID string
 	PrivateIPAddresses []PrivateIP
+	SecurityGroups     []string
 }
 
 // PrivateIP holds a private IP address and whether it is the primary IP.
@@ -32,5 +33,7 @@ func (e *ENI) DeepCopyInterface() ipamTypes.Interface {
 	cp := *e
 	cp.PrivateIPAddresses = make([]PrivateIP, len(e.PrivateIPAddresses))
 	copy(cp.PrivateIPAddresses, e.PrivateIPAddresses)
+	cp.SecurityGroups = make([]string, len(e.SecurityGroups))
+	copy(cp.SecurityGroups, e.SecurityGroups)
 	return &cp
 }

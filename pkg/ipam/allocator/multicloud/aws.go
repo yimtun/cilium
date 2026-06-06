@@ -80,8 +80,33 @@ func (c *awsClient) GetInstance(ctx context.Context, instanceID string) (*ipamTy
 	return dst, nil
 }
 
-func (c *awsClient) CreateNetworkInterface(ctx context.Context, ipCount int, _, subnetID, securityGroupID string) (string, *ENI, error) {
-	eniID, awsENI, err := c.client.CreateNetworkInterface(ctx, int32(ipCount), subnetID, "cilium-multicloud", []string{securityGroupID}, false)
+func (c *awsClient) GetSecurityGroups(ctx context.Context, instanceID, primaryIP string) ([]string, error) {
+	out, err := c.rawEC2.DescribeInstances(ctx, &ec2sdk.DescribeInstancesInput{
+		InstanceIds: []string{instanceID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
+		return nil, fmt.Errorf("aws: instance %s not found", instanceID)
+	}
+	for _, iface := range out.Reservations[0].Instances[0].NetworkInterfaces {
+		if iface.Attachment == nil || iface.Attachment.DeviceIndex == nil || *iface.Attachment.DeviceIndex != 0 {
+			continue
+		}
+		var sgs []string
+		for _, sg := range iface.Groups {
+			if sg.GroupId != nil {
+				sgs = append(sgs, *sg.GroupId)
+			}
+		}
+		return sgs, nil
+	}
+	return nil, fmt.Errorf("aws: primary ENI not found for instance %s", instanceID)
+}
+
+func (c *awsClient) CreateNetworkInterface(ctx context.Context, ipCount int, _, subnetID string, securityGroupIDs []string) (string, *ENI, error) {
+	eniID, awsENI, err := c.client.CreateNetworkInterface(ctx, int32(ipCount), subnetID, "cilium-multicloud", securityGroupIDs, false)
 	if err != nil {
 		return "", nil, err
 	}

@@ -22,7 +22,10 @@ type ClientKey struct {
 type CloudAPI interface {
 	GetInstances(ctx context.Context) (*ipamTypes.InstanceMap, error)
 	GetInstance(ctx context.Context, instanceID string) (*ipamTypes.Instance, error)
-	CreateNetworkInterface(ctx context.Context, ipCount int, vpcID, subnetID, securityGroupID string) (string, *ENI, error)
+	// GetSecurityGroups returns the security group IDs of the primary ENI (eth0)
+	// identified by instanceID and its primary private IP address.
+	GetSecurityGroups(ctx context.Context, instanceID, primaryIP string) ([]string, error)
+	CreateNetworkInterface(ctx context.Context, ipCount int, vpcID, subnetID string, securityGroupIDs []string) (string, *ENI, error)
 	WaitENIAvailable(ctx context.Context, eniID string) error
 	AttachNetworkInterface(ctx context.Context, instanceID, eniID string) error
 	WaitENIAttached(ctx context.Context, eniID string) error

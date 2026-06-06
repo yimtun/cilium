@@ -17,7 +17,8 @@ import (
 )
 
 type alibabaClient struct {
-	client *alibabaAPI.Client
+	client    *alibabaAPI.Client
+	ecsClient *ecs.Client
 }
 
 type alibabaNoopMetrics struct{}
@@ -34,13 +35,14 @@ func newAlibabaClient(key ClientKey) (CloudAPI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("alibaba: create ecs client: %w", err)
 	}
-	vpcClient.Network = "vpc"
-	ecsClient.Network = "vpc"
+	vpcClient.Network = "public"
+	ecsClient.Network = "public"
 	vpcClient.GetConfig().WithScheme("HTTPS")
 	ecsClient.GetConfig().WithScheme("HTTPS")
 
 	return &alibabaClient{
-		client: alibabaAPI.NewClient(vpcClient, ecsClient, alibabaNoopMetrics{}, 4.0, 20, nil),
+		client:    alibabaAPI.NewClient(vpcClient, ecsClient, alibabaNoopMetrics{}, 4.0, 20, nil),
+		ecsClient: ecsClient,
 	}, nil
 }
 
@@ -93,8 +95,25 @@ func (c *alibabaClient) GetInstance(ctx context.Context, instanceID string) (*ip
 	return dst, nil
 }
 
-func (c *alibabaClient) CreateNetworkInterface(ctx context.Context, ipCount int, _, subnetID, securityGroupID string) (string, *ENI, error) {
-	eniID, aliENI, err := c.client.CreateNetworkInterface(ctx, ipCount, subnetID, []string{securityGroupID}, nil)
+func (c *alibabaClient) GetSecurityGroups(ctx context.Context, instanceID, primaryIP string) ([]string, error) {
+	req := ecs.CreateDescribeNetworkInterfacesRequest()
+	req.InstanceId = instanceID
+	resp, err := c.ecsClient.DescribeNetworkInterfaces(req)
+	if err != nil {
+		return nil, fmt.Errorf("alibaba: describe network interfaces: %w", err)
+	}
+	for _, iface := range resp.NetworkInterfaceSets.NetworkInterfaceSet {
+		for _, ip := range iface.PrivateIpSets.PrivateIpSet {
+			if ip.Primary && ip.PrivateIpAddress == primaryIP {
+				return iface.SecurityGroupIds.SecurityGroupId, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("alibaba: primary ENI not found for instance %s ip %s", instanceID, primaryIP)
+}
+
+func (c *alibabaClient) CreateNetworkInterface(ctx context.Context, ipCount int, _, subnetID string, securityGroupIDs []string) (string, *ENI, error) {
+	eniID, aliENI, err := c.client.CreateNetworkInterface(ctx, ipCount, subnetID, securityGroupIDs, nil)
 	if err != nil {
 		return "", nil, err
 	}

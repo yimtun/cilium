@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/cilium/cilium/pkg/ipam"
 	"github.com/cilium/cilium/pkg/ipam/stats"
@@ -15,6 +14,8 @@ import (
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
 )
+
+const nodeInternalIPType = "InternalIP"
 
 const (
 	maxSecondaryIPsPerENI       = 6
@@ -60,6 +61,30 @@ func (n *Node) UpdatedNode(obj *v2.CiliumNode) {
 
 func (n *Node) PopulateStatusFields(resource *v2.CiliumNode) {}
 
+// getSecurityGroupsFromCache returns security groups from an existing cilium-eni
+// in the instance cache, avoiding a cloud API call on subsequent ENI creations.
+func (n *Node) getSecurityGroupsFromCache() []string {
+	var sgs []string
+	n.manager.instances.ForeachInterface(n.instanceID,
+		func(_, _ string, rev ipamTypes.InterfaceRevision) error {
+			if e, ok := rev.Resource.(*ENI); ok && len(e.SecurityGroups) > 0 {
+				sgs = e.SecurityGroups
+			}
+			return nil
+		})
+	return sgs
+}
+
+// getInternalIP returns the node's primary private IP from the CiliumNode addresses.
+func getInternalIP(node *v2.CiliumNode) string {
+	for _, addr := range node.Spec.Addresses {
+		if addr.Type == nodeInternalIPType {
+			return addr.IP
+		}
+	}
+	return ""
+}
+
 // CreateInterface creates a new ENI and attaches it to the node.
 func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationAction, scopedLog *slog.Logger) (int, string, error) {
 	client, err := n.manager.allocator.getOrCreateClient(ctx, n.clientKey)
@@ -69,9 +94,17 @@ func (n *Node) CreateInterface(ctx context.Context, allocation *ipam.AllocationA
 
 	vpcID := n.k8sObj.Spec.MultiCloud.VPCID
 	subnetID := n.k8sObj.Spec.MultiCloud.SubnetID
-	securityGroupID := os.Getenv("POD_SECURITY_GROUP_ID")
 
-	eniID, eni, err := client.CreateNetworkInterface(ctx, maxSecondaryIPsPerENI, vpcID, subnetID, securityGroupID)
+	securityGroups := n.getSecurityGroupsFromCache()
+	if len(securityGroups) == 0 {
+		internalIP := getInternalIP(n.k8sObj)
+		securityGroups, err = client.GetSecurityGroups(ctx, n.instanceID, internalIP)
+		if err != nil {
+			return 0, "", fmt.Errorf("get security groups: %w", err)
+		}
+	}
+
+	eniID, eni, err := client.CreateNetworkInterface(ctx, maxSecondaryIPsPerENI, vpcID, subnetID, securityGroups)
 	if err != nil {
 		return 0, "", err
 	}

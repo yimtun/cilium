@@ -1,3 +1,10 @@
-terraform.tfstate*
-.terraform
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+.terraform/
+*.tfvars
+crash.log
 my_key
+my_key.pub

@@ -1,1 +1,2 @@
-terraform.tfstate*
+files/cloud-credentials.yaml
+hosts.ini

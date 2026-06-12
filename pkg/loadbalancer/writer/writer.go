@@ -453,47 +453,102 @@ func (w *Writer) DefaultSelectBackends(txn statedb.ReadTxn, bes iter.Seq2[*loadb
 		}
 	}
 
-	// Check whether the [Backend.ForZones] hints should be consulted when
-	// selecting a backend.
-	checkZoneHints := false
-	var thisZone *string
-	if node, _, found := w.nodes.Get(txn, node.LocalNodeQuery); found {
-		if zone := node.Labels[corev1.LabelTopologyZone]; zone != "" {
-			thisZone = &zone
-		}
-	}
+	// Topology-aware routing: three-level fallback based on zone string prefix.
+	// Uses be.Zone.Zone (from EndpointSlice endpoint.zone, auto-synced from node labels).
+	// Does NOT depend on K8s topology hints (be.Zone.ForZones).
+	//
+	// Zone format: "{cloud}-{region}-{vpc_id}"
+	//   Level 1: same VPC    — be.Zone.Zone == thisZone
+	//   Level 2: same region — strings.HasPrefix(be.Zone.Zone, thisRegion+"-")
+	//   Level 3: same cloud  — strings.HasPrefix(be.Zone.Zone, cloud+"-")
+	//   Level 4: global fallback
 	if w.config.EnableServiceTopology &&
-		thisZone != nil &&
 		fe != nil && fe.RedirectTo == nil &&
 		(fe.Service.TrafficDistribution == loadbalancer.TrafficDistributionPreferClose ||
 			fe.Service.TrafficDistribution == loadbalancer.TrafficDistributionPreferSameZone) {
-		// Topology-aware routing enabled. See if we can find any backends fitting
-		// for our zone. If we don't find any we fall back to default behaviour.
-		// https://kubernetes.io/docs/concepts/services-networking/topology-aware-routing/#safeguards
-		candidatesFound, missingHints := false, false
-		for be := range bes {
-			if !matchesFrontend(be, fe) {
-				continue
-			}
-			if onlyLocal {
-				if len(be.NodeName) != 0 && be.NodeName != w.nodeName {
-					continue
+
+		var thisZone, thisRegion string
+		if localNode, _, found := w.nodes.Get(txn, node.LocalNodeQuery); found {
+			thisZone = localNode.Labels[corev1.LabelTopologyZone]
+			thisRegion = localNode.Labels[corev1.LabelTopologyRegion]
+		}
+
+		if thisZone != "" {
+			// filterBes returns an iterator over backends matching pred (and onlyLocal).
+			// Returns nil if no matching backend exists.
+			filterBes := func(pred func(*loadbalancer.Backend) bool) iter.Seq2[*loadbalancer.Backend, statedb.Revision] {
+				found := false
+				for be := range bes {
+					if !matchesFrontend(be, fe) {
+						continue
+					}
+					if onlyLocal {
+						if len(be.NodeName) != 0 && be.NodeName != w.nodeName {
+							continue
+						}
+						if !isLocalProxyDelegation(be.Address) {
+							continue
+						}
+					}
+					if pred(be) {
+						found = true
+						break
+					}
 				}
-				if !isLocalProxyDelegation(be.Address) {
-					continue
+				if !found {
+					return nil
+				}
+				return func(yield func(*loadbalancer.Backend, statedb.Revision) bool) {
+					for be, rev := range bes {
+						if !matchesFrontend(be, fe) {
+							continue
+						}
+						if onlyLocal {
+							if len(be.NodeName) != 0 && be.NodeName != w.nodeName {
+								continue
+							}
+							if !isLocalProxyDelegation(be.Address) {
+								continue
+							}
+						}
+						if !pred(be) {
+							continue
+						}
+						if !yield(be, rev) {
+							return
+						}
+					}
 				}
 			}
 
-			if be.Zone != nil && len(be.Zone.ForZones) > 0 {
-				if !candidatesFound && slices.Contains(be.Zone.ForZones, *thisZone) {
-					candidatesFound = true
+			// Level 1: same VPC
+			if it := filterBes(func(be *loadbalancer.Backend) bool {
+				return be.Zone != nil && be.Zone.Zone == thisZone
+			}); it != nil {
+				return it
+			}
+
+			if thisRegion != "" {
+				// Level 2: same cloud + region, different VPC
+				regionPrefix := thisRegion + "-"
+				if it := filterBes(func(be *loadbalancer.Backend) bool {
+					return be.Zone != nil && strings.HasPrefix(be.Zone.Zone, regionPrefix)
+				}); it != nil {
+					return it
 				}
-			} else {
-				missingHints = true
-				break
+
+				// Level 3: same cloud, different region.
+				// Cloud names (aws, alibabacloud, tencentcloud) contain no "-", so the
+				// first "-" safely separates cloud from region name.
+				cloudPrefix := strings.SplitN(thisRegion, "-", 2)[0] + "-"
+				if it := filterBes(func(be *loadbalancer.Backend) bool {
+					return be.Zone != nil && strings.HasPrefix(be.Zone.Zone, cloudPrefix)
+				}); it != nil {
+					return it
+				}
 			}
 		}
-		checkZoneHints = candidatesFound && !missingHints
+		// Level 4: global fallback — fall through
 	}
 
 	return func(yield func(*loadbalancer.Backend, statedb.Revision) bool) {
@@ -510,9 +565,6 @@ func (w *Writer) DefaultSelectBackends(txn statedb.ReadTxn, bes iter.Seq2[*loadb
 				if !isLocalProxyDelegation(be.Address) {
 					continue
 				}
-			}
-			if checkZoneHints && !slices.Contains(be.Zone.ForZones, *thisZone) {
-				continue
 			}
 			if !yield(be, rev) {
 				return

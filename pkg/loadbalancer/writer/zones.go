@@ -36,14 +36,17 @@ type zoneWatcher struct {
 }
 
 func (zw zoneWatcher) run(ctx context.Context, health cell.Health) error {
-	var oldZone string
+	var oldZone, oldRegion string
 	for {
 		txn := zw.Writer.WriteTxn()
 		node, _, watch, found := zw.Nodes.GetWatch(txn, node.LocalNodeQuery)
 		updated := false
 		if found {
 			newZone := node.Labels[corev1.LabelTopologyZone]
-			if newZone != oldZone {
+			newRegion := node.Labels[corev1.LabelTopologyRegion]
+			if newZone != oldZone || newRegion != oldRegion {
+				oldZone = newZone
+				oldRegion = newRegion
 				// Refresh all frontends associated with topology-aware services
 				// as the backend selection might change.
 				for fe := range zw.Writer.fes.All(txn) {

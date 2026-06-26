@@ -12,7 +12,6 @@ import (
 )
 
 // LookupIPInfo returns the MAC address and subnet CIDR for the given IP on this instance.
-// cloudProvider must be one of CloudProviderTencent, CloudProviderAWS, or CloudProviderAliyun.
 func LookupIPInfo(ctx context.Context, cloudProvider, ipStr string) (mac, subnetCIDR string, err error) {
 	switch cloudProvider {
 	case CloudProviderTencent:
@@ -21,6 +20,8 @@ func LookupIPInfo(ctx context.Context, cloudProvider, ipStr string) (mac, subnet
 		return awsLookupIPInfo(ctx, ipStr)
 	case CloudProviderAliyun:
 		return aliLookupIPInfo(ctx, ipStr)
+	case CloudProviderGCP:
+		return gcpLookupIPInfo(ctx, ipStr)
 	default:
 		return "", "", fmt.Errorf("unsupported cloud provider: %s", cloudProvider)
 	}
@@ -150,6 +151,8 @@ func GetInterfacePrimaryIP(ctx context.Context, cloudProvider, mac string) (stri
 			return "", fmt.Errorf("no IPs for MAC %s", mac)
 		}
 		return strings.TrimSpace(ips[0]), nil
+	case CloudProviderGCP:
+		return gcpGetInterfacePrimaryIP(ctx, mac)
 	default:
 		return "", fmt.Errorf("unsupported cloud provider: %s", cloudProvider)
 	}
@@ -167,6 +170,9 @@ func GetPrimaryMAC(ctx context.Context, cloudProvider string) (string, error) {
 		return strings.TrimSpace(raw), err
 	case CloudProviderAliyun:
 		raw, err := httpGet(ctx, aliBase+"/mac", nil)
+		return strings.TrimSpace(raw), err
+	case CloudProviderGCP:
+		raw, err := httpGet(ctx, gcpBase+"/network-interfaces/0/mac", gcpHeaders)
 		return strings.TrimSpace(raw), err
 	default:
 		return "", fmt.Errorf("unsupported cloud provider: %s", cloudProvider)

@@ -24,6 +24,7 @@ const (
 	CloudProviderTencent = "tencentcloud"
 	CloudProviderAliyun  = "alibabacloud"
 	CloudProviderAWS     = "aws"
+	CloudProviderGCP     = "gcp"
 	CloudProviderUnknown = "unknown"
 )
 
@@ -46,6 +47,7 @@ var providers = []cloudProvider{
 	&tencentProvider{},
 	&alibabaProvider{},
 	&awsProvider{},
+	&gcpProvider{},
 }
 
 // GetInstanceMetadata detects the cloud provider and returns instance metadata.

@@ -43,6 +43,8 @@ func newCloudClient(ctx context.Context, key ClientKey) (CloudAPI, error) {
 		return newAlibabaClient(key)
 	case mcMeta.CloudProviderAWS:
 		return newAWSClient(ctx, key)
+	case mcMeta.CloudProviderGCP:
+		return newGCPClient(key)
 	default:
 		return nil, fmt.Errorf("unknown cloud provider %q", key.CloudProvider)
 	}

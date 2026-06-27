@@ -22,6 +22,8 @@ func LookupIPInfo(ctx context.Context, cloudProvider, ipStr string) (mac, subnet
 		return aliLookupIPInfo(ctx, ipStr)
 	case CloudProviderGCP:
 		return gcpLookupIPInfo(ctx, ipStr)
+	case CloudProviderAzure:
+		return azureLookupIPInfo(ctx, ipStr)
 	default:
 		return "", "", fmt.Errorf("unsupported cloud provider: %s", cloudProvider)
 	}
@@ -153,6 +155,8 @@ func GetInterfacePrimaryIP(ctx context.Context, cloudProvider, mac string) (stri
 		return strings.TrimSpace(ips[0]), nil
 	case CloudProviderGCP:
 		return gcpGetInterfacePrimaryIP(ctx, mac)
+	case CloudProviderAzure:
+		return azureGetInterfacePrimaryIP(ctx, mac)
 	default:
 		return "", fmt.Errorf("unsupported cloud provider: %s", cloudProvider)
 	}
@@ -174,6 +178,8 @@ func GetPrimaryMAC(ctx context.Context, cloudProvider string) (string, error) {
 	case CloudProviderGCP:
 		raw, err := httpGet(ctx, gcpBase+"/network-interfaces/0/mac", gcpHeaders)
 		return strings.TrimSpace(raw), err
+	case CloudProviderAzure:
+		return azureGetPrimaryMAC(ctx)
 	default:
 		return "", fmt.Errorf("unsupported cloud provider: %s", cloudProvider)
 	}

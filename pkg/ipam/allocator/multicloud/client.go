@@ -45,6 +45,8 @@ func newCloudClient(ctx context.Context, key ClientKey) (CloudAPI, error) {
 		return newAWSClient(ctx, key)
 	case mcMeta.CloudProviderGCP:
 		return newGCPClient(key)
+	case mcMeta.CloudProviderAzure:
+		return newAzureClient(key)
 	default:
 		return nil, fmt.Errorf("unknown cloud provider %q", key.CloudProvider)
 	}

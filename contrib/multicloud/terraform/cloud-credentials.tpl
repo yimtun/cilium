@@ -11,3 +11,8 @@ stringData:
   ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${alibaba_cloud_access_key_secret}
   TENCENTCLOUD_SECRET_ID: ${tencentcloud_secret_id}
   TENCENTCLOUD_SECRET_KEY: ${tencentcloud_secret_key}
+  GOOGLE_CREDENTIALS_JSON: |
+    ${indent(4, trimspace(google_credentials_json))}
+  AZURE_CREDENTIALS_JSON: |
+    ${indent(4, trimspace(azure_credentials_json))}
+  AZURE_RESOURCE_GROUP: multicloud-test

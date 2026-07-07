@@ -1,0 +1,706 @@
+---
+- name: Topology-aware routing test
+  hosts: k8s_aws
+  become: true
+  vars:
+    kubeconfig: /etc/kubernetes/admin.conf
+    test_ns: topology-test
+
+  tasks:
+    # -------------------------------------------------------
+    # Step 0: 从 CiliumNode spec.multi-cloud 自动推导拓扑标签并打到 k8s node
+    # zone   = {cloud}-{region}-{vpc-id}  (Level 1 同VPC精确匹配)
+    # region = {cloud}-{region}           (Level 2/3 前缀匹配)
+    # -------------------------------------------------------
+    - name: Label nodes from CiliumNode multi-cloud spec
+      shell: |
+        kubectl get ciliumnode -o json | jq -r '
+          .items[] |
+          .metadata.name as $node |
+          .spec["multi-cloud"] as $mc |
+          select($mc != null and $mc["cloud-provider"] != "") |
+          [
+            $node,
+            $mc["cloud-provider"],
+            ($mc["cloud-provider"] + "-" + $mc["region"] + "-" + ($mc["vpc-id"] | .[0:8])),
+            ($mc["cloud-provider"] + "-" + $mc["region"])
+          ] | @tsv
+        ' | while IFS=$'\t' read -r node cloud zone region; do
+            kubectl label node "$node" \
+              node.cilium.io/cloud-provider="$cloud" \
+              topology.kubernetes.io/zone="$zone" \
+              topology.kubernetes.io/region="$region" \
+              --overwrite
+          done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+
+    # -------------------------------------------------------
+    # Step 1: 部署 echo server（每节点一个副本）+ 拓扑感知 Service
+    # -------------------------------------------------------
+    - name: Apply echo server and service
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: {{ test_ns }}
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: echo-server
+            namespace: {{ test_ns }}
+          spec:
+            replicas: 5
+            selector:
+              matchLabels:
+                app: echo-server
+            template:
+              metadata:
+                labels:
+                  app: echo-server
+              spec:
+                affinity:
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                    - labelSelector:
+                        matchLabels:
+                          app: echo-server
+                      topologyKey: kubernetes.io/hostname
+                containers:
+                - name: echo
+                  image: busybox
+                  env:
+                  - name: NODE_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: spec.nodeName
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  command:
+                  - sh
+                  - -c
+                  - mkdir -p /www && echo "node=$NODE_NAME pod=$POD_NAME" > /www/index.html && httpd -f -p 8080 -h /www
+                  ports:
+                  - containerPort: 8080
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: echo-svc
+            namespace: {{ test_ns }}
+          spec:
+            selector:
+              app: echo-server
+            trafficDistribution: PreferClose
+            ports:
+            - port: 80
+              targetPort: 8080
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # -------------------------------------------------------
+    # Step 2: 等待 echo-server 3 个副本全部 Ready
+    # -------------------------------------------------------
+    - name: Wait for echo-server pods ready
+      command: >
+        kubectl -n {{ test_ns }} get deployment echo-server
+        -o jsonpath='{.status.readyReplicas}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: echo_ready
+      until: echo_ready.stdout | int >= 5
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Show pod distribution across clouds
+      command: kubectl -n {{ test_ns }} get pods -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: pod_dist
+      changed_when: false
+
+    - name: Display pod distribution
+      debug:
+        msg: "{{ pod_dist.stdout_lines }}"
+
+    # -------------------------------------------------------
+    # Step 3: 确认 Service 的 trafficDistribution（Cilium 原生就近路由+fallback）
+    # -------------------------------------------------------
+    - name: Check Service trafficDistribution
+      shell: |
+        kubectl -n {{ test_ns }} get svc echo-svc -o json | jq -r '
+          "trafficDistribution=\(.spec.trafficDistribution // "Cluster")  (PreferClose=就近优先+fallback，Cluster=随机)"
+        '
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: svc_policy
+      changed_when: false
+
+    - name: Show Service traffic policy
+      debug:
+        msg: "{{ svc_policy.stdout_lines }}"
+
+    # -------------------------------------------------------
+    # Step 4: 获取各云节点名称，准备创建客户端 Job
+    # -------------------------------------------------------
+    - name: Get node name per cloud
+      shell: >
+        kubectl get nodes -l node.cilium.io/cloud-provider={{ item }}
+        -o jsonpath='{.items[0].metadata.name}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop:
+        - aws
+        - alibabacloud
+        - tencentcloud
+        - gcp
+        - azure
+      register: cloud_nodes
+      changed_when: false
+
+    # -------------------------------------------------------
+    # Step 5: 在每个云的节点上运行客户端 Job，各发 10 次请求
+    # -------------------------------------------------------
+    - name: Create client job for each cloud
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: topology-client-{{ item.item }}
+            namespace: {{ test_ns }}
+          spec:
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                nodeName: {{ item.stdout }}
+                restartPolicy: Never
+                containers:
+                - name: client
+                  image: busybox
+                  command:
+                  - sh
+                  - -c
+                  - for i in $(seq 1 10); do wget -qO- http://echo-svc/; echo; done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop: "{{ cloud_nodes.results }}"
+
+    - name: Wait for client jobs to complete
+      command: >
+        kubectl -n {{ test_ns }} get job topology-client-{{ item }}
+        -o jsonpath='{.status.succeeded}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: job_status
+      until: job_status.stdout | int >= 1
+      retries: 20
+      delay: 10
+      loop:
+        - aws
+        - alibabacloud
+        - tencentcloud
+        - gcp
+        - azure
+      changed_when: false
+
+    # -------------------------------------------------------
+    # Step 6: 读取测试结果，验证就近路由
+    # -------------------------------------------------------
+    - name: Fetch test results per cloud
+      shell: kubectl -n {{ test_ns }} logs job/topology-client-{{ item }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: test_results
+      loop:
+        - aws
+        - alibabacloud
+        - tencentcloud
+        - gcp
+        - azure
+      changed_when: false
+
+    - name: Show topology routing results
+      debug:
+        msg:
+          - "=== From {{ item.item }} node (expect only {{ item.item }} endpoint) ==="
+          - "{{ item.stdout_lines }}"
+      loop: "{{ test_results.results }}"
+
+    # -------------------------------------------------------
+    # Step 7: 统计命中分布（理想：每云 10/10 命中本云节点）
+    # -------------------------------------------------------
+    - name: Summarize hit distribution
+      shell: |
+        echo "=== {{ item }} client hit distribution ==="
+        kubectl -n {{ test_ns }} logs job/topology-client-{{ item }} | sort | uniq -c | sort -rn
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: hit_summary
+      loop:
+        - aws
+        - alibabacloud
+        - tencentcloud
+        - gcp
+        - azure
+      changed_when: false
+
+    - name: Show hit summary
+      debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ hit_summary.results }}"
+
+    - name: Save topology test results to ConfigMap (for collect_env_info.yaml)
+      shell: |
+        NS={{ test_ns }}
+        RESULT=""
+        for cloud in aws alibabacloud tencentcloud gcp azure; do
+          job="topology-client-$cloud"
+          if kubectl -n $NS get job $job &>/dev/null 2>&1; then
+            hits=$(kubectl -n $NS logs job/$job 2>/dev/null | grep -c 'node=' || echo 0)
+            node=$(kubectl -n $NS logs job/$job 2>/dev/null | grep 'node=' | head -1 | sed 's/.*node=//;s/ .*//')
+            RESULT="${RESULT}${cloud}|${hits}|${node}
+        "
+          fi
+        done
+        kubectl -n $NS create configmap topology-test-results \
+          --from-literal=results="$RESULT" \
+          --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+      failed_when: false
+
+    # -------------------------------------------------------
+    # Step 8: Fallback 测试 A — 本云（AWS）无 pod，验证请求 fallback 到其他云
+    # 部署只调度到阿里+腾讯的 echo-server，从 AWS 节点发请求
+    # 期望：全部命中阿里或腾讯，不报错
+    # -------------------------------------------------------
+    - name: Deploy fallback-A echo server (ali + tc only, no aws)
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: echo-fallback-a
+            namespace: {{ test_ns }}
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: echo-fallback-a
+            template:
+              metadata:
+                labels:
+                  app: echo-fallback-a
+              spec:
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                      - matchExpressions:
+                        - key: node.cilium.io/cloud-provider
+                          operator: NotIn
+                          values: [aws]
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                    - labelSelector:
+                        matchLabels:
+                          app: echo-fallback-a
+                      topologyKey: kubernetes.io/hostname
+                containers:
+                - name: echo
+                  image: busybox
+                  env:
+                  - name: NODE_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: spec.nodeName
+                  command:
+                  - sh
+                  - -c
+                  - mkdir -p /www && echo "node=$NODE_NAME" > /www/index.html && httpd -f -p 8080 -h /www
+                  ports:
+                  - containerPort: 8080
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: echo-svc-fallback-a
+            namespace: {{ test_ns }}
+          spec:
+            selector:
+              app: echo-fallback-a
+            trafficDistribution: PreferClose
+            ports:
+            - port: 80
+              targetPort: 8080
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for fallback-A pods ready
+      command: >
+        kubectl -n {{ test_ns }} get deployment echo-fallback-a
+        -o jsonpath='{.status.readyReplicas}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fa_ready
+      until: fa_ready.stdout | int >= 2
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Show fallback-A pod placement
+      shell: kubectl -n {{ test_ns }} get pods -l app=echo-fallback-a -o wide
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fa_pods
+      changed_when: false
+
+    - name: Display fallback-A pod placement
+      debug:
+        msg: "{{ fa_pods.stdout_lines }}"
+
+    - name: Run fallback-A client from AWS node (expect non-aws endpoint)
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: fallback-a-client-aws
+            namespace: {{ test_ns }}
+          spec:
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                nodeName: {{ cloud_nodes.results | selectattr('item', 'equalto', 'aws') | map(attribute='stdout') | first }}
+                restartPolicy: Never
+                containers:
+                - name: client
+                  image: busybox
+                  command:
+                  - sh
+                  - -c
+                  - for i in $(seq 1 10); do wget -qO- http://echo-svc-fallback-a/ || echo "FAILED"; echo; done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for fallback-A client job to complete
+      command: >
+        kubectl -n {{ test_ns }} get job fallback-a-client-aws
+        -o jsonpath='{.status.succeeded}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fa_job_status
+      until: fa_job_status.stdout | int >= 1
+      retries: 20
+      delay: 10
+      changed_when: false
+
+    - name: Show fallback-A results (from AWS, no local pod)
+      shell: |
+        echo "=== Fallback A: AWS client → ali/tc endpoint (expect 10/10 non-aws hits, no FAILED) ==="
+        kubectl -n {{ test_ns }} logs job/fallback-a-client-aws | sort | uniq -c | sort -rn
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fa_result
+      changed_when: false
+
+    - name: Display fallback-A results
+      debug:
+        msg: "{{ fa_result.stdout_lines }}"
+
+    # -------------------------------------------------------
+    # Step 9: Fallback 测试 B — 只有阿里云有 pod，AWS 和腾讯都需要跨云
+    # 期望：AWS 和腾讯的请求全部命中阿里云节点
+    # -------------------------------------------------------
+    - name: Deploy fallback-B echo server (ali only)
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: echo-fallback-b
+            namespace: {{ test_ns }}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: echo-fallback-b
+            template:
+              metadata:
+                labels:
+                  app: echo-fallback-b
+              spec:
+                nodeSelector:
+                  node.cilium.io/cloud-provider: alibabacloud
+                containers:
+                - name: echo
+                  image: busybox
+                  env:
+                  - name: NODE_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: spec.nodeName
+                  command:
+                  - sh
+                  - -c
+                  - mkdir -p /www && echo "node=$NODE_NAME" > /www/index.html && httpd -f -p 8080 -h /www
+                  ports:
+                  - containerPort: 8080
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: echo-svc-fallback-b
+            namespace: {{ test_ns }}
+          spec:
+            selector:
+              app: echo-fallback-b
+            trafficDistribution: PreferClose
+            ports:
+            - port: 80
+              targetPort: 8080
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for fallback-B pod ready
+      command: >
+        kubectl -n {{ test_ns }} get deployment echo-fallback-b
+        -o jsonpath='{.status.readyReplicas}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fb_ready
+      until: fb_ready.stdout | int >= 1
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Run fallback-B clients from AWS and TC (expect ali endpoint)
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: fallback-b-client-{{ item.item }}
+            namespace: {{ test_ns }}
+          spec:
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                nodeName: {{ item.stdout }}
+                restartPolicy: Never
+                containers:
+                - name: client
+                  image: busybox
+                  command:
+                  - sh
+                  - -c
+                  - for i in $(seq 1 10); do wget -qO- http://echo-svc-fallback-b/ || echo "FAILED"; echo; done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop: "{{ cloud_nodes.results | selectattr('item', 'in', ['aws', 'tencentcloud']) | list }}"
+
+    - name: Wait for fallback-B client jobs to complete
+      command: >
+        kubectl -n {{ test_ns }} get job fallback-b-client-{{ item }}
+        -o jsonpath='{.status.succeeded}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fb_job_status
+      until: fb_job_status.stdout | int >= 1
+      retries: 20
+      delay: 10
+      loop:
+        - aws
+        - tencentcloud
+      changed_when: false
+
+    - name: Show fallback-B results (aws + tc → ali endpoint)
+      shell: |
+        echo "=== Fallback B: {{ item }} client → ali endpoint (expect 10/10 ali hits) ==="
+        kubectl -n {{ test_ns }} logs job/fallback-b-client-{{ item }} | sort | uniq -c | sort -rn
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fb_result
+      loop:
+        - aws
+        - tencentcloud
+      changed_when: false
+
+    - name: Display fallback-B results
+      debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ fb_result.results }}"
+
+    # -------------------------------------------------------
+    # Step 10: 清理 fallback 测试资源
+    # -------------------------------------------------------
+    - name: Clean up fallback test resources
+      command: >
+        kubectl -n {{ test_ns }} delete deployment echo-fallback-a echo-fallback-b
+        --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Clean up fallback services
+      command: >
+        kubectl -n {{ test_ns }} delete svc echo-svc-fallback-a echo-svc-fallback-b
+        --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # -------------------------------------------------------
+    # Step 11: 回归测试 — 无 trafficDistribution 的 Service 正常随机路由
+    # 验证我们的改动不破坏默认行为：请求应均匀分散到三个云
+    # -------------------------------------------------------
+    - name: Deploy default-routing echo server (no trafficDistribution)
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: echo-default
+            namespace: {{ test_ns }}
+          spec:
+            replicas: 3
+            selector:
+              matchLabels:
+                app: echo-default
+            template:
+              metadata:
+                labels:
+                  app: echo-default
+              spec:
+                affinity:
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                    - labelSelector:
+                        matchLabels:
+                          app: echo-default
+                      topologyKey: kubernetes.io/hostname
+                containers:
+                - name: echo
+                  image: busybox
+                  env:
+                  - name: NODE_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: spec.nodeName
+                  command:
+                  - sh
+                  - -c
+                  - mkdir -p /www && echo "node=$NODE_NAME" > /www/index.html && httpd -f -p 8080 -h /www
+                  ports:
+                  - containerPort: 8080
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: echo-svc-default
+            namespace: {{ test_ns }}
+          spec:
+            selector:
+              app: echo-default
+            ports:
+            - port: 80
+              targetPort: 8080
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for default echo-server pods ready
+      command: >
+        kubectl -n {{ test_ns }} get deployment echo-default
+        -o jsonpath='{.status.readyReplicas}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: ed_ready
+      until: ed_ready.stdout | int >= 3
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Confirm echo-svc-default has no trafficDistribution
+      shell: |
+        kubectl -n {{ test_ns }} get svc echo-svc-default -o json | jq -r '
+          "trafficDistribution=\(.spec.trafficDistribution // "(none, default Cluster routing)")"
+        '
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: default_svc_policy
+      changed_when: false
+
+    - name: Show default service policy
+      debug:
+        msg: "{{ default_svc_policy.stdout_lines }}"
+
+    - name: Run default-routing client from AWS node (30 requests, expect spread across all 3 clouds)
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: default-client-aws
+            namespace: {{ test_ns }}
+          spec:
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                nodeName: {{ cloud_nodes.results | selectattr('item', 'equalto', 'aws') | map(attribute='stdout') | first }}
+                restartPolicy: Never
+                containers:
+                - name: client
+                  image: busybox
+                  command:
+                  - sh
+                  - -c
+                  - for i in $(seq 1 30); do wget -qO- http://echo-svc-default/ || echo "FAILED"; echo; done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for default-routing client job to complete
+      command: >
+        kubectl -n {{ test_ns }} get job default-client-aws
+        -o jsonpath='{.status.succeeded}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: ed_job_status
+      until: ed_job_status.stdout | int >= 1
+      retries: 20
+      delay: 10
+      changed_when: false
+
+    - name: Show default-routing results (expect hits on all 3 clouds, no FAILED)
+      shell: |
+        echo "=== Default routing: AWS client → all clouds (expect spread, no FAILED) ==="
+        kubectl -n {{ test_ns }} logs job/default-client-aws | sort | uniq -c | sort -rn
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: ed_result
+      changed_when: false
+
+    - name: Display default-routing results
+      debug:
+        msg: "{{ ed_result.stdout_lines }}"
+
+    - name: Clean up default-routing test resources
+      command: >
+        kubectl -n {{ test_ns }} delete deployment echo-default
+        svc echo-svc-default job default-client-aws
+        --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"

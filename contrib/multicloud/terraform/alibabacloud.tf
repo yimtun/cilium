@@ -146,6 +146,30 @@ resource "alicloud_security_group_rule" "from_aws_wg" {
   cidr_ip           = "${aws_eip.aws-wg.public_ip}/32"
 }
 
+resource "alicloud_security_group_rule" "from_gcp" {
+  security_group_id = alicloud_security_group.ali.id
+  type              = "ingress"
+  ip_protocol       = "all"
+  port_range        = "-1/-1"
+  cidr_ip           = "${google_compute_address.gcp.address}/32"
+}
+
+resource "alicloud_security_group_rule" "from_gcp_wg" {
+  security_group_id = alicloud_security_group.ali.id
+  type              = "ingress"
+  ip_protocol       = "all"
+  port_range        = "-1/-1"
+  cidr_ip           = "${google_compute_address.gcp-wg.address}/32"
+}
+
+resource "alicloud_security_group_rule" "from_gcp_vpc" {
+  security_group_id = alicloud_security_group.ali.id
+  type              = "ingress"
+  ip_protocol       = "all"
+  port_range        = "-1/-1"
+  cidr_ip           = "10.204.0.0/16"
+}
+
 resource "alicloud_security_group_rule" "from_tc_vpc" {
   security_group_id = alicloud_security_group.ali.id
   type              = "ingress"
@@ -162,6 +186,30 @@ resource "alicloud_security_group_rule" "from_aws_vpc" {
   cidr_ip           = "10.201.0.0/16"
 }
 
+resource "alicloud_security_group_rule" "from_azure" {
+  security_group_id = alicloud_security_group.ali.id
+  type              = "ingress"
+  ip_protocol       = "all"
+  port_range        = "-1/-1"
+  cidr_ip           = "${azurerm_public_ip.azure.ip_address}/32"
+}
+
+resource "alicloud_security_group_rule" "from_azure_wg" {
+  security_group_id = alicloud_security_group.ali.id
+  type              = "ingress"
+  ip_protocol       = "all"
+  port_range        = "-1/-1"
+  cidr_ip           = "${azurerm_public_ip.azure-wg.ip_address}/32"
+}
+
+resource "alicloud_security_group_rule" "from_azure_vpc" {
+  security_group_id = alicloud_security_group.ali.id
+  type              = "ingress"
+  ip_protocol       = "all"
+  port_range        = "-1/-1"
+  cidr_ip           = "10.205.0.0/16"
+}
+
 resource "alicloud_route_entry" "ali_to_tc" {
   route_table_id        = alicloud_vpc.ali.route_table_id
   destination_cidrblock = "10.202.0.0/16"
@@ -172,6 +220,20 @@ resource "alicloud_route_entry" "ali_to_tc" {
 resource "alicloud_route_entry" "ali_to_aws" {
   route_table_id        = alicloud_vpc.ali.route_table_id
   destination_cidrblock = "10.201.0.0/16"
+  nexthop_type          = "Instance"
+  nexthop_id            = alicloud_instance.ali-wg.id
+}
+
+resource "alicloud_route_entry" "ali_to_gcp" {
+  route_table_id        = alicloud_vpc.ali.route_table_id
+  destination_cidrblock = "10.204.0.0/16"
+  nexthop_type          = "Instance"
+  nexthop_id            = alicloud_instance.ali-wg.id
+}
+
+resource "alicloud_route_entry" "ali_to_azure" {
+  route_table_id        = alicloud_vpc.ali.route_table_id
+  destination_cidrblock = "10.205.0.0/16"
   nexthop_type          = "Instance"
   nexthop_id            = alicloud_instance.ali-wg.id
 }

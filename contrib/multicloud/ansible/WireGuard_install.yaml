@@ -1,21 +1,23 @@
 ---
-# WireGuard mesh installation across 3 clouds
+# WireGuard mesh installation across 5 clouds
 #
 # WireGuard tunnel network: 10.200.0.0/24
-#   tc-wg  wg0: 10.200.0.1   vpc: 10.202.0.0/16
-#   aws-wg wg0: 10.200.0.2   vpc: 10.201.0.0/16
-#   ali-wg wg0: 10.200.0.3   vpc: 10.203.0.0/16
+#   tc-wg    wg0: 10.200.0.1   vpc: 10.202.0.0/16
+#   aws-wg   wg0: 10.200.0.2   vpc: 10.201.0.0/16
+#   ali-wg   wg0: 10.200.0.3   vpc: 10.203.0.0/16
+#   gcp-wg   wg0: 10.200.0.4   vpc: 10.204.0.0/16
+#   azure-wg wg0: 10.200.0.5   vpc: 10.205.0.0/16
 #
 # Usage:
 #   ansible-playbook -i hosts.ini WireGuard_install.yaml
 
 # -------------------------------------------------------
-# Play 0: Bootstrap root SSH access on AWS instances
-# AWS AMI 默认只允许 rocky 用户登录，需先以 rocky 身份
+# Play 0: Bootstrap root SSH access on AWS/GCP/Azure instances
+# Rocky Linux AMI 默认只允许 rocky 用户登录，需先以 rocky 身份
 # 把 authorized_keys 复制到 root，后续统一用 root 操作
 # -------------------------------------------------------
-- name: Bootstrap root SSH access on AWS instances
-  hosts: aws_bootstrap
+- name: Bootstrap root SSH access on AWS, GCP and Azure instances
+  hosts: aws_bootstrap,gcp_bootstrap
   become: true
   tasks:
     - name: Ensure /root/.ssh directory
@@ -34,6 +36,65 @@
         owner: root
         group: root
         mode: '0600'
+
+    - name: Enable root SSH login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin yes'
+        state: present
+
+    - name: Restart sshd
+      systemd:
+        name: sshd
+        state: restarted
+
+    - name: Verify root SSH access
+      local_action:
+        module: shell
+        cmd: >
+          ssh -i ../terraform/my_key
+          -o StrictHostKeyChecking=no
+          -o ConnectTimeout=10
+          root@{{ ansible_host }} echo ok
+      become: false
+      register: result
+      retries: 5
+      delay: 3
+      until: result.rc == 0
+
+- name: Bootstrap root SSH access on Azure instances (almalinux user)
+  hosts: azure_bootstrap
+  become: true
+  tasks:
+    - name: Ensure /root/.ssh directory
+      file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Copy authorized_keys to root
+      copy:
+        src: /home/almalinux/.ssh/authorized_keys
+        dest: /root/.ssh/authorized_keys
+        remote_src: yes
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Enable root SSH login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin yes'
+        state: present
+
+    - name: Restart sshd
+      systemd:
+        name: sshd
+        state: restarted
 
     - name: Verify root SSH access
       local_action:
@@ -109,12 +170,6 @@
         wg_privkey: "{{ _privkey.content | b64decode | trim }}"
         wg_pubkey:  "{{ _pubkey.content  | b64decode | trim }}"
 
-#    - name: Open WireGuard UDP port in firewalld
-#      shell: |
-#        firewall-cmd --add-port={{ wg_port }}/udp --permanent
-#        firewall-cmd --reload
-#      ignore_errors: true   # firewalld may not be running
-
 # -------------------------------------------------------
 # Play 2: Write wg0.conf and start WireGuard
 # Keys from Play 1 are accessible via hostvars[]
@@ -125,13 +180,17 @@
   vars:
     wg_port: 51820
     # WireGuard mesh IPs
-    tc_wg_ip:  "10.200.0.1"
-    aws_wg_ip: "10.200.0.2"
-    ali_wg_ip: "10.200.0.3"
+    tc_wg_ip:    "10.200.0.1"
+    aws_wg_ip:   "10.200.0.2"
+    ali_wg_ip:   "10.200.0.3"
+    gcp_wg_ip:   "10.200.0.4"
+    azure_wg_ip: "10.200.0.5"
     # Cloud VPC CIDRs
-    tc_vpc:  "10.202.0.0/16"
-    aws_vpc: "10.201.0.0/16"
-    ali_vpc: "10.203.0.0/16"
+    tc_vpc:    "10.202.0.0/16"
+    aws_vpc:   "10.201.0.0/16"
+    ali_vpc:   "10.203.0.0/16"
+    gcp_vpc:   "10.204.0.0/16"
+    azure_vpc: "10.205.0.0/16"
   handlers:
     - name: restart wg0
       systemd:
@@ -162,6 +221,20 @@
           Endpoint            = {{ groups['wg_ali'][0] }}:{{ wg_port }}
           AllowedIPs          = {{ ali_wg_ip }}/32, {{ ali_vpc }}
           PersistentKeepalive = 25
+
+          # gcp-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_gcp'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_gcp'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ gcp_wg_ip }}/32, {{ gcp_vpc }}
+          PersistentKeepalive = 25
+
+          # azure-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_azure'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_azure'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ azure_wg_ip }}/32, {{ azure_vpc }}
+          PersistentKeepalive = 25
       when: inventory_hostname in groups['wg_tc']
       notify: restart wg0
 
@@ -188,6 +261,20 @@
           PublicKey           = {{ hostvars[groups['wg_ali'][0]]['wg_pubkey'] }}
           Endpoint            = {{ groups['wg_ali'][0] }}:{{ wg_port }}
           AllowedIPs          = {{ ali_wg_ip }}/32, {{ ali_vpc }}
+          PersistentKeepalive = 25
+
+          # gcp-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_gcp'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_gcp'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ gcp_wg_ip }}/32, {{ gcp_vpc }}
+          PersistentKeepalive = 25
+
+          # azure-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_azure'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_azure'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ azure_wg_ip }}/32, {{ azure_vpc }}
           PersistentKeepalive = 25
       when: inventory_hostname in groups['wg_aws']
       notify: restart wg0
@@ -216,7 +303,103 @@
           Endpoint            = {{ groups['wg_aws'][0] }}:{{ wg_port }}
           AllowedIPs          = {{ aws_wg_ip }}/32, {{ aws_vpc }}
           PersistentKeepalive = 25
+
+          # gcp-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_gcp'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_gcp'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ gcp_wg_ip }}/32, {{ gcp_vpc }}
+          PersistentKeepalive = 25
+
+          # azure-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_azure'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_azure'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ azure_wg_ip }}/32, {{ azure_vpc }}
+          PersistentKeepalive = 25
       when: inventory_hostname in groups['wg_ali']
+      notify: restart wg0
+
+    # ---- gcp-wg config ----
+    - name: Write wg0.conf for gcp-wg
+      copy:
+        dest: /etc/wireguard/wg0.conf
+        mode: '0600'
+        content: |
+          [Interface]
+          Address    = {{ gcp_wg_ip }}/24
+          PrivateKey = {{ hostvars[groups['wg_gcp'][0]]['wg_privkey'] }}
+          ListenPort = {{ wg_port }}
+
+          # tc-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_tc'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_tc'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ tc_wg_ip }}/32, {{ tc_vpc }}
+          PersistentKeepalive = 25
+
+          # aws-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_aws'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_aws'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ aws_wg_ip }}/32, {{ aws_vpc }}
+          PersistentKeepalive = 25
+
+          # ali-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_ali'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_ali'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ ali_wg_ip }}/32, {{ ali_vpc }}
+          PersistentKeepalive = 25
+
+          # azure-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_azure'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_azure'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ azure_wg_ip }}/32, {{ azure_vpc }}
+          PersistentKeepalive = 25
+      when: inventory_hostname in groups['wg_gcp']
+      notify: restart wg0
+
+    # ---- azure-wg config ----
+    - name: Write wg0.conf for azure-wg
+      copy:
+        dest: /etc/wireguard/wg0.conf
+        mode: '0600'
+        content: |
+          [Interface]
+          Address    = {{ azure_wg_ip }}/24
+          PrivateKey = {{ hostvars[groups['wg_azure'][0]]['wg_privkey'] }}
+          ListenPort = {{ wg_port }}
+
+          # tc-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_tc'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_tc'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ tc_wg_ip }}/32, {{ tc_vpc }}
+          PersistentKeepalive = 25
+
+          # aws-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_aws'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_aws'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ aws_wg_ip }}/32, {{ aws_vpc }}
+          PersistentKeepalive = 25
+
+          # ali-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_ali'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_ali'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ ali_wg_ip }}/32, {{ ali_vpc }}
+          PersistentKeepalive = 25
+
+          # gcp-wg
+          [Peer]
+          PublicKey           = {{ hostvars[groups['wg_gcp'][0]]['wg_pubkey'] }}
+          Endpoint            = {{ groups['wg_gcp'][0] }}:{{ wg_port }}
+          AllowedIPs          = {{ gcp_wg_ip }}/32, {{ gcp_vpc }}
+          PersistentKeepalive = 25
+      when: inventory_hostname in groups['wg_azure']
       notify: restart wg0
 
     - name: Enable and start wg-quick@wg0
@@ -235,98 +418,272 @@
         msg: "{{ wg_status.stdout_lines }}"
 
 # -------------------------------------------------------
-# Play 3: Connectivity test — each wg node pings the
-#         other two via WireGuard tunnel IP and VPC private IP
+# Play 3: Connectivity test — each wg node pings all others
+#         via WireGuard tunnel IP and VPC private IP
 #
 # WireGuard IPs:  tc=10.200.0.1  aws=10.200.0.2  ali=10.200.0.3
+#                 gcp=10.200.0.4  azure=10.200.0.5
 # VPC private IP: tc=10.202.1.102 aws=10.201.1.102 ali=10.203.1.102
+#                 gcp=10.204.1.102 azure=10.205.1.102
 # -------------------------------------------------------
 - name: Cross-cloud connectivity test
   hosts: wg_nodes
   become: true
   vars:
-    # WireGuard tunnel IPs
-    tc_wg_ip:  "10.200.0.1"
-    aws_wg_ip: "10.200.0.2"
-    ali_wg_ip: "10.200.0.3"
-    # VPC private IPs of wg nodes
-    tc_wg_private:  "10.202.1.102"
-    aws_wg_private: "10.201.1.102"
-    ali_wg_private: "10.203.1.102"
+    tc_wg_ip:    "10.200.0.1"
+    aws_wg_ip:   "10.200.0.2"
+    ali_wg_ip:   "10.200.0.3"
+    gcp_wg_ip:   "10.200.0.4"
+    azure_wg_ip: "10.200.0.5"
+    tc_wg_private:    "10.202.1.102"
+    aws_wg_private:   "10.201.1.102"
+    ali_wg_private:   "10.203.1.102"
+    gcp_wg_private:   "10.204.1.102"
+    azure_wg_private: "10.205.1.102"
   tasks:
     # ---- from tc-wg ----
-    - name: "[tc-wg] ping aws-wg via WireGuard tunnel (10.200.0.2)"
+    - name: "[tc-wg] ping aws-wg via WireGuard tunnel"
       command: ping -c 3 -W 3 {{ aws_wg_ip }}
       when: inventory_hostname in groups['wg_tc']
       register: tc_ping_aws_wg
       changed_when: false
 
-    - name: "[tc-wg] ping ali-wg via WireGuard tunnel (10.200.0.3)"
+    - name: "[tc-wg] ping ali-wg via WireGuard tunnel"
       command: ping -c 3 -W 3 {{ ali_wg_ip }}
       when: inventory_hostname in groups['wg_tc']
       register: tc_ping_ali_wg
       changed_when: false
 
-    - name: "[tc-wg] ping aws-wg via VPC private IP (10.201.1.102)"
+    - name: "[tc-wg] ping gcp-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ gcp_wg_ip }}
+      when: inventory_hostname in groups['wg_tc']
+      register: tc_ping_gcp_wg
+      changed_when: false
+
+    - name: "[tc-wg] ping azure-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ azure_wg_ip }}
+      when: inventory_hostname in groups['wg_tc']
+      register: tc_ping_azure_wg
+      changed_when: false
+
+    - name: "[tc-wg] ping aws-wg via VPC private IP"
       command: ping -c 3 -W 3 {{ aws_wg_private }}
       when: inventory_hostname in groups['wg_tc']
       register: tc_ping_aws_priv
       changed_when: false
 
-    - name: "[tc-wg] ping ali-wg via VPC private IP (10.203.1.102)"
+    - name: "[tc-wg] ping ali-wg via VPC private IP"
       command: ping -c 3 -W 3 {{ ali_wg_private }}
       when: inventory_hostname in groups['wg_tc']
       register: tc_ping_ali_priv
       changed_when: false
 
+    - name: "[tc-wg] ping gcp-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ gcp_wg_private }}
+      when: inventory_hostname in groups['wg_tc']
+      register: tc_ping_gcp_priv
+      changed_when: false
+
+    - name: "[tc-wg] ping azure-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ azure_wg_private }}
+      when: inventory_hostname in groups['wg_tc']
+      register: tc_ping_azure_priv
+      changed_when: false
+
     # ---- from aws-wg ----
-    - name: "[aws-wg] ping tc-wg via WireGuard tunnel (10.200.0.1)"
+    - name: "[aws-wg] ping tc-wg via WireGuard tunnel"
       command: ping -c 3 -W 3 {{ tc_wg_ip }}
       when: inventory_hostname in groups['wg_aws']
       register: aws_ping_tc_wg
       changed_when: false
 
-    - name: "[aws-wg] ping ali-wg via WireGuard tunnel (10.200.0.3)"
+    - name: "[aws-wg] ping ali-wg via WireGuard tunnel"
       command: ping -c 3 -W 3 {{ ali_wg_ip }}
       when: inventory_hostname in groups['wg_aws']
       register: aws_ping_ali_wg
       changed_when: false
 
-    - name: "[aws-wg] ping tc-wg via VPC private IP (10.202.1.102)"
+    - name: "[aws-wg] ping gcp-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ gcp_wg_ip }}
+      when: inventory_hostname in groups['wg_aws']
+      register: aws_ping_gcp_wg
+      changed_when: false
+
+    - name: "[aws-wg] ping azure-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ azure_wg_ip }}
+      when: inventory_hostname in groups['wg_aws']
+      register: aws_ping_azure_wg
+      changed_when: false
+
+    - name: "[aws-wg] ping tc-wg via VPC private IP"
       command: ping -c 3 -W 3 {{ tc_wg_private }}
       when: inventory_hostname in groups['wg_aws']
       register: aws_ping_tc_priv
       changed_when: false
 
-    - name: "[aws-wg] ping ali-wg via VPC private IP (10.203.1.102)"
+    - name: "[aws-wg] ping ali-wg via VPC private IP"
       command: ping -c 3 -W 3 {{ ali_wg_private }}
       when: inventory_hostname in groups['wg_aws']
       register: aws_ping_ali_priv
       changed_when: false
 
+    - name: "[aws-wg] ping gcp-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ gcp_wg_private }}
+      when: inventory_hostname in groups['wg_aws']
+      register: aws_ping_gcp_priv
+      changed_when: false
+
+    - name: "[aws-wg] ping azure-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ azure_wg_private }}
+      when: inventory_hostname in groups['wg_aws']
+      register: aws_ping_azure_priv
+      changed_when: false
+
     # ---- from ali-wg ----
-    - name: "[ali-wg] ping tc-wg via WireGuard tunnel (10.200.0.1)"
+    - name: "[ali-wg] ping tc-wg via WireGuard tunnel"
       command: ping -c 3 -W 3 {{ tc_wg_ip }}
       when: inventory_hostname in groups['wg_ali']
       register: ali_ping_tc_wg
       changed_when: false
 
-    - name: "[ali-wg] ping aws-wg via WireGuard tunnel (10.200.0.2)"
+    - name: "[ali-wg] ping aws-wg via WireGuard tunnel"
       command: ping -c 3 -W 3 {{ aws_wg_ip }}
       when: inventory_hostname in groups['wg_ali']
       register: ali_ping_aws_wg
       changed_when: false
 
-    - name: "[ali-wg] ping tc-wg via VPC private IP (10.202.1.102)"
+    - name: "[ali-wg] ping gcp-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ gcp_wg_ip }}
+      when: inventory_hostname in groups['wg_ali']
+      register: ali_ping_gcp_wg
+      changed_when: false
+
+    - name: "[ali-wg] ping azure-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ azure_wg_ip }}
+      when: inventory_hostname in groups['wg_ali']
+      register: ali_ping_azure_wg
+      changed_when: false
+
+    - name: "[ali-wg] ping tc-wg via VPC private IP"
       command: ping -c 3 -W 3 {{ tc_wg_private }}
       when: inventory_hostname in groups['wg_ali']
       register: ali_ping_tc_priv
       changed_when: false
 
-    - name: "[ali-wg] ping aws-wg via VPC private IP (10.201.1.102)"
+    - name: "[ali-wg] ping aws-wg via VPC private IP"
       command: ping -c 3 -W 3 {{ aws_wg_private }}
       when: inventory_hostname in groups['wg_ali']
       register: ali_ping_aws_priv
+      changed_when: false
+
+    - name: "[ali-wg] ping gcp-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ gcp_wg_private }}
+      when: inventory_hostname in groups['wg_ali']
+      register: ali_ping_gcp_priv
+      changed_when: false
+
+    - name: "[ali-wg] ping azure-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ azure_wg_private }}
+      when: inventory_hostname in groups['wg_ali']
+      register: ali_ping_azure_priv
+      changed_when: false
+
+    # ---- from gcp-wg ----
+    - name: "[gcp-wg] ping tc-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ tc_wg_ip }}
+      when: inventory_hostname in groups['wg_gcp']
+      register: gcp_ping_tc_wg
+      changed_when: false
+
+    - name: "[gcp-wg] ping aws-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ aws_wg_ip }}
+      when: inventory_hostname in groups['wg_gcp']
+      register: gcp_ping_aws_wg
+      changed_when: false
+
+    - name: "[gcp-wg] ping ali-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ ali_wg_ip }}
+      when: inventory_hostname in groups['wg_gcp']
+      register: gcp_ping_ali_wg
+      changed_when: false
+
+    - name: "[gcp-wg] ping azure-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ azure_wg_ip }}
+      when: inventory_hostname in groups['wg_gcp']
+      register: gcp_ping_azure_wg
+      changed_when: false
+
+    - name: "[gcp-wg] ping tc-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ tc_wg_private }}
+      when: inventory_hostname in groups['wg_gcp']
+      register: gcp_ping_tc_priv
+      changed_when: false
+
+    - name: "[gcp-wg] ping aws-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ aws_wg_private }}
+      when: inventory_hostname in groups['wg_gcp']
+      register: gcp_ping_aws_priv
+      changed_when: false
+
+    - name: "[gcp-wg] ping ali-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ ali_wg_private }}
+      when: inventory_hostname in groups['wg_gcp']
+      register: gcp_ping_ali_priv
+      changed_when: false
+
+    - name: "[gcp-wg] ping azure-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ azure_wg_private }}
+      when: inventory_hostname in groups['wg_gcp']
+      register: gcp_ping_azure_priv
+      changed_when: false
+
+    # ---- from azure-wg ----
+    - name: "[azure-wg] ping tc-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ tc_wg_ip }}
+      when: inventory_hostname in groups['wg_azure']
+      register: azure_ping_tc_wg
+      changed_when: false
+
+    - name: "[azure-wg] ping aws-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ aws_wg_ip }}
+      when: inventory_hostname in groups['wg_azure']
+      register: azure_ping_aws_wg
+      changed_when: false
+
+    - name: "[azure-wg] ping ali-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ ali_wg_ip }}
+      when: inventory_hostname in groups['wg_azure']
+      register: azure_ping_ali_wg
+      changed_when: false
+
+    - name: "[azure-wg] ping gcp-wg via WireGuard tunnel"
+      command: ping -c 3 -W 3 {{ gcp_wg_ip }}
+      when: inventory_hostname in groups['wg_azure']
+      register: azure_ping_gcp_wg
+      changed_when: false
+
+    - name: "[azure-wg] ping tc-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ tc_wg_private }}
+      when: inventory_hostname in groups['wg_azure']
+      register: azure_ping_tc_priv
+      changed_when: false
+
+    - name: "[azure-wg] ping aws-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ aws_wg_private }}
+      when: inventory_hostname in groups['wg_azure']
+      register: azure_ping_aws_priv
+      changed_when: false
+
+    - name: "[azure-wg] ping ali-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ ali_wg_private }}
+      when: inventory_hostname in groups['wg_azure']
+      register: azure_ping_ali_priv
+      changed_when: false
+
+    - name: "[azure-wg] ping gcp-wg via VPC private IP"
+      command: ping -c 3 -W 3 {{ gcp_wg_private }}
+      when: inventory_hostname in groups['wg_azure']
+      register: azure_ping_gcp_priv
       changed_when: false
 
     # ---- 汇总结果 ----
@@ -335,40 +692,72 @@
         msg: |
           === {{ inventory_hostname }} connectivity ===
           {% if inventory_hostname in groups['wg_tc'] %}
-          [WG tunnel] -> aws-wg ({{ aws_wg_ip }}):  {{ 'OK' if tc_ping_aws_wg.rc == 0 else 'FAIL' }}
-          [WG tunnel] -> ali-wg ({{ ali_wg_ip }}):  {{ 'OK' if tc_ping_ali_wg.rc == 0 else 'FAIL' }}
-          [VPC priv]  -> aws-wg ({{ aws_wg_private }}): {{ 'OK' if tc_ping_aws_priv.rc == 0 else 'FAIL' }}
-          [VPC priv]  -> ali-wg ({{ ali_wg_private }}): {{ 'OK' if tc_ping_ali_priv.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> aws-wg   ({{ aws_wg_ip }}):    {{ 'OK' if tc_ping_aws_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> ali-wg   ({{ ali_wg_ip }}):    {{ 'OK' if tc_ping_ali_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> gcp-wg   ({{ gcp_wg_ip }}):    {{ 'OK' if tc_ping_gcp_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> azure-wg ({{ azure_wg_ip }}):  {{ 'OK' if tc_ping_azure_wg.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> aws-wg   ({{ aws_wg_private }}): {{ 'OK' if tc_ping_aws_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> ali-wg   ({{ ali_wg_private }}): {{ 'OK' if tc_ping_ali_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> gcp-wg   ({{ gcp_wg_private }}): {{ 'OK' if tc_ping_gcp_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> azure-wg ({{ azure_wg_private }}): {{ 'OK' if tc_ping_azure_priv.rc == 0 else 'FAIL' }}
           {% elif inventory_hostname in groups['wg_aws'] %}
-          [WG tunnel] -> tc-wg  ({{ tc_wg_ip }}):  {{ 'OK' if aws_ping_tc_wg.rc == 0 else 'FAIL' }}
-          [WG tunnel] -> ali-wg ({{ ali_wg_ip }}):  {{ 'OK' if aws_ping_ali_wg.rc == 0 else 'FAIL' }}
-          [VPC priv]  -> tc-wg  ({{ tc_wg_private }}): {{ 'OK' if aws_ping_tc_priv.rc == 0 else 'FAIL' }}
-          [VPC priv]  -> ali-wg ({{ ali_wg_private }}): {{ 'OK' if aws_ping_ali_priv.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> tc-wg    ({{ tc_wg_ip }}):     {{ 'OK' if aws_ping_tc_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> ali-wg   ({{ ali_wg_ip }}):    {{ 'OK' if aws_ping_ali_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> gcp-wg   ({{ gcp_wg_ip }}):    {{ 'OK' if aws_ping_gcp_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> azure-wg ({{ azure_wg_ip }}):  {{ 'OK' if aws_ping_azure_wg.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> tc-wg    ({{ tc_wg_private }}): {{ 'OK' if aws_ping_tc_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> ali-wg   ({{ ali_wg_private }}): {{ 'OK' if aws_ping_ali_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> gcp-wg   ({{ gcp_wg_private }}): {{ 'OK' if aws_ping_gcp_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> azure-wg ({{ azure_wg_private }}): {{ 'OK' if aws_ping_azure_priv.rc == 0 else 'FAIL' }}
           {% elif inventory_hostname in groups['wg_ali'] %}
-          [WG tunnel] -> tc-wg  ({{ tc_wg_ip }}):  {{ 'OK' if ali_ping_tc_wg.rc == 0 else 'FAIL' }}
-          [WG tunnel] -> aws-wg ({{ aws_wg_ip }}):  {{ 'OK' if ali_ping_aws_wg.rc == 0 else 'FAIL' }}
-          [VPC priv]  -> tc-wg  ({{ tc_wg_private }}): {{ 'OK' if ali_ping_tc_priv.rc == 0 else 'FAIL' }}
-          [VPC priv]  -> aws-wg ({{ aws_wg_private }}): {{ 'OK' if ali_ping_aws_priv.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> tc-wg    ({{ tc_wg_ip }}):     {{ 'OK' if ali_ping_tc_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> aws-wg   ({{ aws_wg_ip }}):    {{ 'OK' if ali_ping_aws_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> gcp-wg   ({{ gcp_wg_ip }}):    {{ 'OK' if ali_ping_gcp_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> azure-wg ({{ azure_wg_ip }}):  {{ 'OK' if ali_ping_azure_wg.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> tc-wg    ({{ tc_wg_private }}): {{ 'OK' if ali_ping_tc_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> aws-wg   ({{ aws_wg_private }}): {{ 'OK' if ali_ping_aws_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> gcp-wg   ({{ gcp_wg_private }}): {{ 'OK' if ali_ping_gcp_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> azure-wg ({{ azure_wg_private }}): {{ 'OK' if ali_ping_azure_priv.rc == 0 else 'FAIL' }}
+          {% elif inventory_hostname in groups['wg_gcp'] %}
+          [WG tunnel] -> tc-wg    ({{ tc_wg_ip }}):     {{ 'OK' if gcp_ping_tc_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> aws-wg   ({{ aws_wg_ip }}):    {{ 'OK' if gcp_ping_aws_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> ali-wg   ({{ ali_wg_ip }}):    {{ 'OK' if gcp_ping_ali_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> azure-wg ({{ azure_wg_ip }}):  {{ 'OK' if gcp_ping_azure_wg.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> tc-wg    ({{ tc_wg_private }}): {{ 'OK' if gcp_ping_tc_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> aws-wg   ({{ aws_wg_private }}): {{ 'OK' if gcp_ping_aws_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> ali-wg   ({{ ali_wg_private }}): {{ 'OK' if gcp_ping_ali_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> azure-wg ({{ azure_wg_private }}): {{ 'OK' if gcp_ping_azure_priv.rc == 0 else 'FAIL' }}
+          {% elif inventory_hostname in groups['wg_azure'] %}
+          [WG tunnel] -> tc-wg  ({{ tc_wg_ip }}):   {{ 'OK' if azure_ping_tc_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> aws-wg ({{ aws_wg_ip }}):   {{ 'OK' if azure_ping_aws_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> ali-wg ({{ ali_wg_ip }}):   {{ 'OK' if azure_ping_ali_wg.rc == 0 else 'FAIL' }}
+          [WG tunnel] -> gcp-wg ({{ gcp_wg_ip }}):   {{ 'OK' if azure_ping_gcp_wg.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> tc-wg  ({{ tc_wg_private }}): {{ 'OK' if azure_ping_tc_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> aws-wg ({{ aws_wg_private }}): {{ 'OK' if azure_ping_aws_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> ali-wg ({{ ali_wg_private }}): {{ 'OK' if azure_ping_ali_priv.rc == 0 else 'FAIL' }}
+          [VPC priv]  -> gcp-wg ({{ gcp_wg_private }}): {{ 'OK' if azure_ping_gcp_priv.rc == 0 else 'FAIL' }}
           {% endif %}
 
 # -------------------------------------------------------
 # Play 4: k8s 节点跨云内网连通性测试
-# 每个节点 ping 另外两个 k8s 节点的内网 IP，验证 VPC 路由
-# 经由各自的 WG 网关转发
 # -------------------------------------------------------
 - name: k8s node internal connectivity test
-  hosts: k8s_tc,k8s_ali,k8s_aws
+  hosts: k8s_tc,k8s_ali,k8s_aws,k8s_gcp,k8s_azure
   become: true
   vars:
-    aws_k8s: "10.201.1.101"
-    tc_k8s:  "10.202.1.101"
-    ali_k8s: "10.203.1.101"
+    aws_k8s:       "10.201.1.101"
+    tc_k8s:        "10.202.1.101"
+    ali_k8s:       "10.203.1.101"
+    gcp_k8s:       "10.204.1.101"
+    azure_k8s:     "10.205.1.101"
+    gcp_k8s_nic1:  "10.204.2.2"
+    azure_k8s_nic1: "10.205.2.4"
   tasks:
-    - name: Ping all other k8s nodes
+    - name: Ping all other k8s nodes (nic0)
       command: ping -c 3 -W 3 {{ item }}
       loop: >-
         {{
-          ([aws_k8s, tc_k8s, ali_k8s] | reject('eq',
+          ([aws_k8s, tc_k8s, ali_k8s, gcp_k8s, azure_k8s] | reject('eq',
             ansible_default_ipv4.address) | list)
         }}
       changed_when: false

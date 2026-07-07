@@ -123,3 +123,64 @@ resource "tencentcloud_cam_user_policy_attachment" "cilium_eni" {
 resource "tencentcloud_cam_access_key" "cilium_eni" {
   target_uin = tencentcloud_cam_user.cilium_eni.uin
 }
+
+# ===== Google Cloud IAM =====
+
+resource "google_service_account" "cilium_eni" {
+  account_id   = "cilium-multicloud-eni"
+  display_name = "Cilium Multicloud ENI"
+  project      = var.gcp_project
+}
+
+resource "google_project_iam_custom_role" "cilium_eni" {
+  role_id = "ciliumMulticloudEni"
+  title   = "Cilium Multicloud ENI"
+  project = var.gcp_project
+  permissions = [
+    "compute.instances.get",
+    "compute.instances.list",
+    "compute.networks.get",
+    "compute.networks.list",
+    "compute.subnetworks.get",
+    "compute.subnetworks.list",
+    "compute.subnetworks.use",
+    "compute.addresses.create",
+    "compute.addresses.delete",
+    "compute.addresses.get",
+    "compute.addresses.list",
+    "compute.addresses.use",
+    "compute.instances.updateNetworkInterface",
+  ]
+}
+
+resource "google_project_iam_member" "cilium_eni" {
+  project = var.gcp_project
+  role    = google_project_iam_custom_role.cilium_eni.id
+  member  = "serviceAccount:${google_service_account.cilium_eni.email}"
+}
+
+resource "google_service_account_key" "cilium_eni" {
+  service_account_id = google_service_account.cilium_eni.name
+}
+
+# ===== Azure AD Service Principal =====
+
+data "azurerm_client_config" "current" {}
+
+resource "azuread_application" "cilium_eni" {
+  display_name = "cilium-multicloud-eni"
+}
+
+resource "azuread_service_principal" "cilium_eni" {
+  client_id = azuread_application.cilium_eni.client_id
+}
+
+resource "azuread_service_principal_password" "cilium_eni" {
+  service_principal_id = azuread_service_principal.cilium_eni.id
+}
+
+resource "azurerm_role_assignment" "cilium_eni" {
+  scope                = azurerm_resource_group.azure.id
+  role_definition_name = "Network Contributor"
+  principal_id         = azuread_service_principal.cilium_eni.object_id
+}

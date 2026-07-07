@@ -10,6 +10,14 @@ output "ali_public_ip" {
   value = alicloud_eip_address.ali.ip_address
 }
 
+output "azure_public_ip" {
+  value = azurerm_public_ip.azure.ip_address
+}
+
+output "azure_wg_public_ip" {
+  value = azurerm_public_ip.azure-wg.ip_address
+}
+
 # output "tc_security_group_id" {
 #   value = tencentcloud_security_group.tc.id
 # }

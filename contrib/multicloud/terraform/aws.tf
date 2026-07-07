@@ -66,6 +66,14 @@ resource "aws_route_table" "aws" {
     cidr_block           = "10.203.0.0/16"
     network_interface_id = aws_instance.aws-wg.primary_network_interface_id
   }
+  route {
+    cidr_block           = "10.204.0.0/16"
+    network_interface_id = aws_instance.aws-wg.primary_network_interface_id
+  }
+  route {
+    cidr_block           = "10.205.0.0/16"
+    network_interface_id = aws_instance.aws-wg.primary_network_interface_id
+  }
   tags = { Name = "multicloud-test-aws" }
 }
 
@@ -111,6 +119,18 @@ resource "aws_security_group" "aws" {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
+    cidr_blocks = ["${google_compute_address.gcp.address}/32"]
+  }
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["${google_compute_address.gcp-wg.address}/32"]
+  }
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["10.202.0.0/16"]
   }
   ingress {
@@ -125,6 +145,30 @@ resource "aws_security_group" "aws" {
     protocol    = "-1"
     cidr_blocks = ["10.201.0.0/16"]
   }
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["10.204.0.0/16"]
+  }
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["${azurerm_public_ip.azure.ip_address}/32"]
+  }
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["${azurerm_public_ip.azure-wg.ip_address}/32"]
+  }
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["10.205.0.0/16"]
+  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -135,7 +179,7 @@ resource "aws_security_group" "aws" {
 
 resource "aws_instance" "aws" {
   ami                         = var.aws_ami_id
-  instance_type               = "t3.large"
+  instance_type               = "t3.xlarge"
   subnet_id                   = aws_subnet.aws.id
   key_name                    = aws_key_pair.cilium_test.key_name
   vpc_security_group_ids      = [aws_security_group.aws.id]

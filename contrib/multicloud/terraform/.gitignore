@@ -8,3 +8,4 @@ terraform.tfstate.backup
 crash.log
 my_key
 my_key.pub
+.terraform.tfstate.lock.info

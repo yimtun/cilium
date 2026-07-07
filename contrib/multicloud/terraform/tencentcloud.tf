@@ -99,6 +99,16 @@ resource "tencentcloud_security_group_rule_set" "tc" {
   ingress {
     protocol   = "ALL"
     action     = "ACCEPT"
+    cidr_block = "${google_compute_address.gcp.address}/32"
+  }
+  ingress {
+    protocol   = "ALL"
+    action     = "ACCEPT"
+    cidr_block = "${google_compute_address.gcp-wg.address}/32"
+  }
+  ingress {
+    protocol   = "ALL"
+    action     = "ACCEPT"
     cidr_block = "10.202.0.0/16"
   }
   ingress {
@@ -111,6 +121,26 @@ resource "tencentcloud_security_group_rule_set" "tc" {
     action     = "ACCEPT"
     cidr_block = "10.201.0.0/16"
   }
+  ingress {
+    protocol   = "ALL"
+    action     = "ACCEPT"
+    cidr_block = "10.204.0.0/16"
+  }
+  ingress {
+    protocol   = "ALL"
+    action     = "ACCEPT"
+    cidr_block = "${azurerm_public_ip.azure.ip_address}/32"
+  }
+  ingress {
+    protocol   = "ALL"
+    action     = "ACCEPT"
+    cidr_block = "${azurerm_public_ip.azure-wg.ip_address}/32"
+  }
+  ingress {
+    protocol   = "ALL"
+    action     = "ACCEPT"
+    cidr_block = "10.205.0.0/16"
+  }
   egress {
     action     = "ACCEPT"
     cidr_block = "0.0.0.0/0"
@@ -120,7 +150,7 @@ resource "tencentcloud_security_group_rule_set" "tc" {
 resource "tencentcloud_instance" "tc" {
   instance_name           = "multicloud-test-tc"
   availability_zone       = "${var.tc_region}-1"
-  instance_type           = "SA2.LARGE4"
+  instance_type           = "SA4.LARGE8"
   image_id                = var.tc_image_id
   vpc_id                  = tencentcloud_vpc.tc.id
   subnet_id               = tencentcloud_subnet.tc.id
@@ -166,4 +196,17 @@ resource "tencentcloud_route_table_entry" "tc_to_ali" {
   next_hub               = tencentcloud_instance.tc-wg.private_ip
 }
 
+resource "tencentcloud_route_table_entry" "tc_to_gcp" {
+  route_table_id         = tencentcloud_route_table.tc.id
+  destination_cidr_block = "10.204.0.0/16"
+  next_type              = "NORMAL_CVM"
+  next_hub               = tencentcloud_instance.tc-wg.private_ip
+}
+
+resource "tencentcloud_route_table_entry" "tc_to_azure" {
+  route_table_id         = tencentcloud_route_table.tc.id
+  destination_cidr_block = "10.205.0.0/16"
+  next_type              = "NORMAL_CVM"
+  next_hub               = tencentcloud_instance.tc-wg.private_ip
+}
 

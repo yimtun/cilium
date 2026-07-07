@@ -12,6 +12,18 @@ terraform {
       source  = "aliyun/alicloud"
       version = "~> 1.220"
     }
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+    azuread = {
+      source  = "hashicorp/azuread"
+      version = "~> 3.0"
+    }
     local = {
       source  = "hashicorp/local"
       version = "2.5.3"
@@ -30,3 +42,15 @@ provider "aws" {
 provider "alicloud" {
   region = var.ali_region
 }
+
+provider "google" {
+  project = var.gcp_project
+  region  = var.gcp_region
+}
+
+provider "azurerm" {
+  features {}
+  subscription_id = var.azure_subscription_id
+}
+
+provider "azuread" {}

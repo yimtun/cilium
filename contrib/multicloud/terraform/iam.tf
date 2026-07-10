@@ -132,8 +132,12 @@ resource "google_service_account" "cilium_eni" {
   project      = var.gcp_project
 }
 
+resource "random_id" "cilium_eni_suffix" {
+  byte_length = 4
+}
+
 resource "google_project_iam_custom_role" "cilium_eni" {
-  role_id = "ciliumMulticloudEni"
+  role_id     = "ciliumMulticloudEni${random_id.cilium_eni_suffix.hex}"
   title   = "Cilium Multicloud ENI"
   project = var.gcp_project
   permissions = [

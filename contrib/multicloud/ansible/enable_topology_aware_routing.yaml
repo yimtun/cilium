@@ -318,6 +318,7 @@
         --set enableIPv4Masquerade=false
         --set loadBalancer.serviceTopology=true
         --set enableK8sEndpointSlice=true
+        --set bpf.hostLegacyRouting=true
         --set "operator.extraEnv[0].name=AWS_ACCESS_KEY_ID"
         --set "operator.extraEnv[0].valueFrom.secretKeyRef.name=cloud-credentials"
         --set "operator.extraEnv[0].valueFrom.secretKeyRef.key=AWS_ACCESS_KEY_ID"

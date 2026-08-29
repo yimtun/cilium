@@ -113,10 +113,21 @@
         name: NetworkManager
         state: reloaded
 
+    # NetworkManager reload briefly disrupts connectivity; without this the next
+    # task can hit a truncated TLS handshake (ASN1: NOT_ENOUGH_DATA).
+    - name: Wait for network to settle after NetworkManager reload
+      wait_for_connection:
+        delay: 5
+        timeout: 60
+
     - name: Add Docker CE repo
       get_url:
-        url: http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+        url: https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
         dest: /etc/yum.repos.d/docker-ce.repo
+      register: docker_repo
+      retries: 5
+      delay: 5
+      until: docker_repo is succeeded
 
     - name: Install containerd
       yum:

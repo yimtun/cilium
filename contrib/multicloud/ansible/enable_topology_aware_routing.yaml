@@ -120,14 +120,22 @@
         delay: 5
         timeout: 60
 
+    # Do not use get_url here. On some cloud images ansible-core 2.14 fails to
+    # assemble its CA store and aborts with "ASN1: NOT_ENOUGH_DATA" before any
+    # request is made -- reproducible even over plain http, and unaffected by
+    # update-ca-trust or by switching mirrors. The repo file is static, so write
+    # it directly, the same way the Kubernetes repo below is handled. dnf itself
+    # uses libcurl and is unaffected.
     - name: Add Docker CE repo
-      get_url:
-        url: https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+      copy:
         dest: /etc/yum.repos.d/docker-ce.repo
-      register: docker_repo
-      retries: 5
-      delay: 5
-      until: docker_repo is succeeded
+        content: |
+          [docker-ce-stable]
+          name=Docker CE Stable - $basearch
+          baseurl=https://mirrors.aliyun.com/docker-ce/linux/centos/$releasever/$basearch/stable
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://mirrors.aliyun.com/docker-ce/linux/centos/gpg
 
     - name: Install containerd
       yum:

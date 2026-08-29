@@ -85,7 +85,14 @@
                   command:
                   - sh
                   - -c
-                  - mkdir -p /www && echo "node=$NODE_NAME pod=$POD_NAME" > /www/index.html && httpd -f -p 8080 -h /www
+                  - |
+                    mkdir -p /www/cgi-bin
+                    echo "node=$NODE_NAME pod=$POD_NAME" > /www/index.html
+                    # busybox httpd exports REMOTE_ADDR to cgi-bin scripts, so a client can
+                    # check whether its source IP survived the path (see the SNAT probe below).
+                    printf '#!/bin/sh\necho "Content-Type: text/plain"\necho\necho "node=$NODE_NAME pod=$POD_NAME client=$REMOTE_ADDR"\n' > /www/cgi-bin/whoami
+                    chmod +x /www/cgi-bin/whoami
+                    httpd -f -p 8080 -h /www
                   ports:
                   - containerPort: 8080
           ---
@@ -165,9 +172,29 @@
       register: cloud_nodes
       changed_when: false
 
+    # Reverse lookup used by the assertions below: responses carry a node name,
+    # but every expectation is expressed in terms of the cloud it belongs to.
+    - name: Build node -> cloud lookup
+      set_fact:
+        node_cloud: "{{ dict(cloud_nodes.results | map(attribute='stdout') | zip(cloud_nodes.results | map(attribute='item'))) }}"
+
     # -------------------------------------------------------
     # Step 5: 在每个云的节点上运行客户端 Job，各发 10 次请求
     # -------------------------------------------------------
+    - name: Drop leftover client jobs from a previous run (Job templates are immutable)
+      command: >
+        kubectl -n {{ test_ns }} delete job topology-client-{{ item }}
+        --ignore-not-found --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop:
+        - aws
+        - alibabacloud
+        - tencentcloud
+        - gcp
+        - azure
+      changed_when: false
+
     - name: Create client job for each cloud
       command: kubectl apply -f -
       args:
@@ -235,6 +262,25 @@
           - "{{ item.stdout_lines }}"
       loop: "{{ test_results.results }}"
 
+    # Without this the play only prints results and can never fail on wrong
+    # routing -- every scenario below is only as trustworthy as its assertion.
+    - name: Assert each client stayed inside its own cloud
+      vars:
+        expected_node: "{{ (cloud_nodes.results | selectattr('item', 'equalto', item.item) | first).stdout | trim }}"
+        hit_nodes: "{{ item.stdout_lines | select('search', '^node=') | map('regex_replace', '^node=(\\S+).*$', '\\1') | list }}"
+      assert:
+        that:
+          - hit_nodes | length == 10
+          - hit_nodes | unique | length == 1
+          - hit_nodes | first == expected_node
+        success_msg: "{{ item.item }}: 10/10 hits on local endpoint {{ expected_node }}"
+        fail_msg: >-
+          {{ item.item }} client expected all 10 hits on {{ expected_node }},
+          got {{ hit_nodes | unique }} across {{ hit_nodes | length }} responses
+      loop: "{{ test_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
     # -------------------------------------------------------
     # Step 7: 统计命中分布（理想：每云 10/10 命中本云节点）
     # -------------------------------------------------------
@@ -257,6 +303,124 @@
       debug:
         msg: "{{ item.stdout }}"
       loop: "{{ hit_summary.results }}"
+
+    # -------------------------------------------------------
+    # Step 7b: 跨云 Pod-to-Pod 直连，验证源 IP 未被 SNAT
+    # 这是整套方案的核心不变量（helm 里 enableIPv4Masquerade=false）。
+    # 不能走 Service：PreferClose 会命中本地 endpoint，根本不出云。
+    # 所以绕开 Service，从 AWS 节点直接打其余四个云的 Pod IP。
+    # -------------------------------------------------------
+    - name: Map each cloud to its echo-server pod IP
+      shell: |
+        kubectl -n {{ test_ns }} get pods -l app=echo-server \
+          -o jsonpath='{range .items[*]}{.spec.nodeName}{" "}{.status.podIP}{"\n"}{end}' |
+        while read -r node ip; do
+          [ -n "$node" ] || continue
+          cloud=$(kubectl get node "$node" -o jsonpath='{.metadata.labels.node\.cilium\.io/cloud-provider}')
+          echo "$cloud $ip"
+        done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: pod_ip_map
+      changed_when: false
+
+    - name: Build probe target list (every cloud except the client's own)
+      set_fact:
+        srcip_targets: "{{ pod_ip_map.stdout_lines | reject('search', '^aws ') | map('regex_replace', '^(\\S+)\\s+(\\S+)$', '\\1=\\2') | join(' ') }}"
+
+    # A Job's spec.template is immutable, so re-applying an edited probe fails with
+    # "field is immutable" whenever a previous run's Job is still around (it lingers
+    # if the play aborted before cleanup, or within ttlSecondsAfterFinished).
+    - name: Drop any leftover source IP probe from a previous run
+      command: kubectl -n {{ test_ns }} delete job srcip-probe --ignore-not-found --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+
+    - name: Run cross-cloud source IP probe from the AWS node
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: srcip-probe
+            namespace: {{ test_ns }}
+          spec:
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                nodeName: {{ (cloud_nodes.results | selectattr('item', 'equalto', 'aws') | first).stdout }}
+                restartPolicy: Never
+                containers:
+                - name: probe
+                  image: busybox
+                  command:
+                  - sh
+                  - -c
+                  - |
+                    mine=$(hostname -i)
+                    for t in {{ srcip_targets }}; do
+                      cloud=${t%%=*}
+                      ip=${t#*=}
+                      raw=$(wget -qO- "http://$ip:8080/cgi-bin/whoami" 2>/dev/null | sed -n 's/.*client=\([^ ]*\).*/\1/p')
+                      # busybox httpd reports REMOTE_ADDR as an IPv4-mapped IPv6
+                      # literal, e.g. "[::ffff:10.201.1.238]". Normalise before comparing.
+                      seen=$(echo "$raw" | tr -d '[]' | sed 's/^::ffff://')
+                      if [ -z "$raw" ]; then
+                        echo "target=$cloud UNREACHABLE mine=$mine"
+                      elif [ "$seen" = "$mine" ]; then
+                        echo "target=$cloud OK mine=$mine seen=$seen raw=$raw"
+                      else
+                        echo "target=$cloud SNAT mine=$mine seen=$seen raw=$raw"
+                      fi
+                    done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for source IP probe to finish
+      command: >
+        kubectl -n {{ test_ns }} get job srcip-probe
+        -o jsonpath='{.status.succeeded}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: srcip_job
+      until: srcip_job.stdout | int >= 1
+      retries: 20
+      delay: 10
+      changed_when: false
+
+    - name: Fetch source IP probe results
+      command: kubectl -n {{ test_ns }} logs job/srcip-probe
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: srcip_result
+      changed_when: false
+
+    - name: Show source IP probe results
+      debug:
+        msg:
+          - "=== Cross-cloud pod-to-pod source IP (expect OK on every target) ==="
+          - "{{ srcip_result.stdout_lines }}"
+
+    - name: Assert source IP was preserved across every cross-cloud hop
+      vars:
+        probe_lines: "{{ srcip_result.stdout_lines | select('search', '^target=') | list }}"
+      assert:
+        that:
+          - (probe_lines | length) == (srcip_targets.split() | length)
+          - probe_lines | select('search', ' SNAT ') | list | length == 0
+          - probe_lines | select('search', ' UNREACHABLE ') | list | length == 0
+        success_msg: "source IP preserved on all {{ probe_lines | length }} cross-cloud paths"
+        fail_msg: >-
+          cross-cloud source IP check failed: {{ probe_lines }}
+          (SNAT means masquerading is on somewhere; UNREACHABLE means pod-to-pod
+          routing is broken for that cloud)
+
+    - name: Clean up source IP probe
+      command: kubectl -n {{ test_ns }} delete job srcip-probe --ignore-not-found
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
 
     - name: Save topology test results to ConfigMap (for collect_env_info.yaml)
       shell: |
@@ -308,9 +472,12 @@
                     requiredDuringSchedulingIgnoredDuringExecution:
                       nodeSelectorTerms:
                       - matchExpressions:
+                        # Pin to ali+tc explicitly. "NotIn: [aws]" was written when the
+                        # cluster only had aws/ali/tc; with gcp/azure joined, pods drifted
+                        # onto the new nodes and this case stopped testing what it claims.
                         - key: node.cilium.io/cloud-provider
-                          operator: NotIn
-                          values: [aws]
+                          operator: In
+                          values: [alibabacloud, tencentcloud]
                   podAntiAffinity:
                     requiredDuringSchedulingIgnoredDuringExecution:
                     - labelSelector:
@@ -419,6 +586,25 @@
     - name: Display fallback-A results
       debug:
         msg: "{{ fa_result.stdout_lines }}"
+
+    - name: Fetch fallback-A raw hits
+      command: kubectl -n {{ test_ns }} logs job/fallback-a-client-aws
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fa_raw
+      changed_when: false
+
+    - name: Assert fallback-A spilled over to ali/tc only
+      vars:
+        fa_clouds: "{{ fa_raw.stdout_lines | select('search', '^node=') | map('regex_replace', '^node=(\\S+).*$', '\\1') | map('extract', node_cloud) | list }}"
+      assert:
+        that:
+          - fa_clouds | length == 10
+          - (fa_clouds | unique | difference(['alibabacloud', 'tencentcloud'])) | length == 0
+        success_msg: "fallback-A: 10/10 spilled to {{ fa_clouds | unique | sort }}"
+        fail_msg: >-
+          fallback-A expected all 10 hits on alibabacloud/tencentcloud,
+          got {{ fa_clouds | unique }} across {{ fa_clouds | length }} responses
 
     # -------------------------------------------------------
     # Step 9: Fallback 测试 B — 只有阿里云有 pod，AWS 和腾讯都需要跨云
@@ -545,26 +731,225 @@
         msg: "{{ item.stdout_lines }}"
       loop: "{{ fb_result.results }}"
 
+    - name: Fetch fallback-B raw hits
+      command: kubectl -n {{ test_ns }} logs job/fallback-b-client-{{ item }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fb_raw
+      loop:
+        - aws
+        - tencentcloud
+      changed_when: false
+
+    - name: Assert fallback-B always landed on alibabacloud
+      vars:
+        fb_clouds: "{{ item.stdout_lines | select('search', '^node=') | map('regex_replace', '^node=(\\S+).*$', '\\1') | map('extract', node_cloud) | list }}"
+      assert:
+        that:
+          - fb_clouds | length == 10
+          - fb_clouds | unique == ['alibabacloud']
+        success_msg: "fallback-B: {{ item.item }} client → 10/10 alibabacloud"
+        fail_msg: >-
+          fallback-B expected {{ item.item }} client to hit alibabacloud 10/10,
+          got {{ fb_clouds | unique }} across {{ fb_clouds | length }} responses
+      loop: "{{ fb_raw.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # -------------------------------------------------------
+    # Step 9b: Fallback 测试 C — 只有 GCP 和 Azure 有 pod
+    # GCP 的 alias IP 和 Azure 的 ipConfiguration 是最新、验证最少的两条
+    # 数据面路径，之前只在"就近命中"场景出现过，没进过跨云外溢场景。
+    # -------------------------------------------------------
+    - name: Deploy fallback-C echo server (gcp + azure only)
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: echo-fallback-c
+            namespace: {{ test_ns }}
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: echo-fallback-c
+            template:
+              metadata:
+                labels:
+                  app: echo-fallback-c
+              spec:
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                      - matchExpressions:
+                        - key: node.cilium.io/cloud-provider
+                          operator: In
+                          values: [gcp, azure]
+                  podAntiAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                    - labelSelector:
+                        matchLabels:
+                          app: echo-fallback-c
+                      topologyKey: kubernetes.io/hostname
+                containers:
+                - name: echo
+                  image: busybox
+                  env:
+                  - name: NODE_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: spec.nodeName
+                  command:
+                  - sh
+                  - -c
+                  - mkdir -p /www && echo "node=$NODE_NAME" > /www/index.html && httpd -f -p 8080 -h /www
+                  ports:
+                  - containerPort: 8080
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: echo-svc-fallback-c
+            namespace: {{ test_ns }}
+          spec:
+            selector:
+              app: echo-fallback-c
+            trafficDistribution: PreferClose
+            ports:
+            - port: 80
+              targetPort: 8080
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for fallback-C pods ready
+      command: >
+        kubectl -n {{ test_ns }} get deployment echo-fallback-c
+        -o jsonpath='{.status.readyReplicas}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fc_ready
+      until: fc_ready.stdout | int >= 2
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Drop leftover fallback-C client jobs
+      command: >
+        kubectl -n {{ test_ns }} delete job fallback-c-client-{{ item }}
+        --ignore-not-found --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop:
+        - aws
+        - alibabacloud
+        - tencentcloud
+      changed_when: false
+
+    - name: Run fallback-C clients from aws, ali and tc (expect gcp/azure endpoint)
+      command: kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: fallback-c-client-{{ item.item }}
+            namespace: {{ test_ns }}
+          spec:
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                nodeName: {{ item.stdout }}
+                restartPolicy: Never
+                containers:
+                - name: client
+                  image: busybox
+                  command:
+                  - sh
+                  - -c
+                  - for i in $(seq 1 10); do wget -qO- http://echo-svc-fallback-c/ || echo FAILED; done
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop: "{{ cloud_nodes.results | selectattr('item', 'in', ['aws', 'alibabacloud', 'tencentcloud']) | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Wait for fallback-C client jobs to complete
+      command: >
+        kubectl -n {{ test_ns }} get job fallback-c-client-{{ item }}
+        -o jsonpath='{.status.succeeded}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fc_job_status
+      until: fc_job_status.stdout | int >= 1
+      retries: 20
+      delay: 10
+      loop:
+        - aws
+        - alibabacloud
+        - tencentcloud
+      changed_when: false
+
+    - name: Fetch fallback-C raw hits
+      command: kubectl -n {{ test_ns }} logs job/fallback-c-client-{{ item }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: fc_raw
+      loop:
+        - aws
+        - alibabacloud
+        - tencentcloud
+      changed_when: false
+
+    - name: Show fallback-C results
+      debug:
+        msg:
+          - "=== Fallback C: {{ item.item }} client → gcp/azure endpoint ==="
+          - "{{ item.stdout_lines }}"
+      loop: "{{ fc_raw.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Assert fallback-C reached gcp/azure from every other cloud
+      vars:
+        fc_clouds: "{{ item.stdout_lines | select('search', '^node=') | map('regex_replace', '^node=(\\S+).*$', '\\1') | map('extract', node_cloud) | list }}"
+      assert:
+        that:
+          - fc_clouds | length == 10
+          - (fc_clouds | unique | difference(['gcp', 'azure'])) | length == 0
+        success_msg: "fallback-C: {{ item.item }} client → 10/10 {{ fc_clouds | unique | sort }}"
+        fail_msg: >-
+          fallback-C expected {{ item.item }} client to reach gcp/azure 10/10,
+          got {{ fc_clouds | unique }} across {{ fc_clouds | length }} responses
+          (empty or short means the gcp alias-IP / azure ipConfiguration datapath is broken)
+      loop: "{{ fc_raw.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
     # -------------------------------------------------------
     # Step 10: 清理 fallback 测试资源
     # -------------------------------------------------------
     - name: Clean up fallback test resources
       command: >
-        kubectl -n {{ test_ns }} delete deployment echo-fallback-a echo-fallback-b
+        kubectl -n {{ test_ns }} delete deployment echo-fallback-a echo-fallback-b echo-fallback-c
         --ignore-not-found=true
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
     - name: Clean up fallback services
       command: >
-        kubectl -n {{ test_ns }} delete svc echo-svc-fallback-a echo-svc-fallback-b
+        kubectl -n {{ test_ns }} delete svc echo-svc-fallback-a echo-svc-fallback-b echo-svc-fallback-c
         --ignore-not-found=true
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
     # -------------------------------------------------------
     # Step 11: 回归测试 — 无 trafficDistribution 的 Service 正常随机路由
-    # 验证我们的改动不破坏默认行为：请求应均匀分散到三个云
+    # 验证我们的改动不破坏默认行为：请求应分散到多个云，而不是只命中本地。
+    # replicas 必须铺满每个节点：以前是 3 副本 + 仅 podAntiAffinity，5 个节点里
+    # 随机落 3 个，每次跑命中的云都不一样，结果不可复现。
     # -------------------------------------------------------
     - name: Deploy default-routing echo server (no trafficDistribution)
       command: kubectl apply -f -
@@ -576,7 +961,7 @@
             name: echo-default
             namespace: {{ test_ns }}
           spec:
-            replicas: 3
+            replicas: 5
             selector:
               matchLabels:
                 app: echo-default
@@ -628,7 +1013,7 @@
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       register: ed_ready
-      until: ed_ready.stdout | int >= 3
+      until: ed_ready.stdout | int >= 5
       retries: 30
       delay: 10
       changed_when: false
@@ -647,7 +1032,13 @@
       debug:
         msg: "{{ default_svc_policy.stdout_lines }}"
 
-    - name: Run default-routing client from AWS node (30 requests, expect spread across all 3 clouds)
+    - name: Drop leftover default-routing client job
+      command: kubectl -n {{ test_ns }} delete job default-client-aws --ignore-not-found --wait=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+
+    - name: Run default-routing client from AWS node (30 requests, expect spread across clouds)
       command: kubectl apply -f -
       args:
         stdin: |
@@ -684,7 +1075,7 @@
       delay: 10
       changed_when: false
 
-    - name: Show default-routing results (expect hits on all 3 clouds, no FAILED)
+    - name: Show default-routing results (expect spread across clouds, no FAILED)
       shell: |
         echo "=== Default routing: AWS client → all clouds (expect spread, no FAILED) ==="
         kubectl -n {{ test_ns }} logs job/default-client-aws | sort | uniq -c | sort -rn
@@ -697,10 +1088,60 @@
       debug:
         msg: "{{ ed_result.stdout_lines }}"
 
+    - name: Fetch default-routing raw hits
+      command: kubectl -n {{ test_ns }} logs job/default-client-aws
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: ed_raw
+      changed_when: false
+
+    # This is the control group for every PreferClose case above: without
+    # trafficDistribution the same client must NOT collapse onto its local
+    # endpoint. If this ever asserts a single cloud, the "local hit" results
+    # elsewhere prove nothing.
+    - name: Assert default routing spread beyond the local cloud
+      vars:
+        ed_clouds: "{{ ed_raw.stdout_lines | select('search', '^node=') | map('regex_replace', '^node=(\\S+).*$', '\\1') | map('extract', node_cloud) | list }}"
+      assert:
+        that:
+          - ed_raw.stdout_lines | select('search', 'FAILED') | list | length == 0
+          - ed_clouds | length == 30
+          - ed_clouds | unique | length >= 3
+        success_msg: "default routing: 30 requests spread over {{ ed_clouds | unique | sort }}"
+        fail_msg: >-
+          default routing expected 30 responses spread over at least 3 clouds,
+          got {{ ed_clouds | unique }} across {{ ed_clouds | length }} responses
+
     - name: Clean up default-routing test resources
       command: >
         kubectl -n {{ test_ns }} delete deployment echo-default
         svc echo-svc-default job default-client-aws
+        --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # -------------------------------------------------------
+    # Step 12: 收尾 — 删掉场景 1 的工作负载
+    # 以前 echo-server/echo-svc 会一直留着，下次重跑时场景 1 直接复用上一轮的 pod，
+    # 部署路径根本没被重测。这里不删命名空间：topology-test-results ConfigMap 就
+    # 存在里面，collect_env_info.yaml 要读它。
+    # -------------------------------------------------------
+    - name: Tear down the scenario-1 workload (keep ns and the results ConfigMap)
+      command: >
+        kubectl -n {{ test_ns }} delete deployment echo-server
+        svc echo-svc
+        --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Tear down leftover client jobs
+      command: >
+        kubectl -n {{ test_ns }} delete job
+        topology-client-aws topology-client-alibabacloud topology-client-tencentcloud
+        topology-client-gcp topology-client-azure
+        fallback-a-client-aws fallback-b-client-aws fallback-b-client-tencentcloud
+        fallback-c-client-aws fallback-c-client-alibabacloud fallback-c-client-tencentcloud
+        srcip-probe
         --ignore-not-found=true
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
